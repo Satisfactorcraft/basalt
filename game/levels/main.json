@@ -1,0 +1,46 @@
+{
+  "environment": {
+    "clear_color": [0.32, 0.45, 0.62, 1.0],
+    "sun_direction": [-0.5, -1.0, -0.35],
+    "sun_color": [1.0, 0.96, 0.88],
+    "sun_intensity": 1.1,
+    "ambient": [0.18, 0.2, 0.26]
+  },
+  "entities": [
+    {
+      "name": "camera",
+      "position": [0, 3, 9],
+      "rotation": [-15, 0, 0],
+      "camera": { "fov": 70, "near": 0.1, "far": 500 },
+      "script": "scripts/fly_camera.lua",
+      "params": { "speed": 6 }
+    },
+    {
+      "name": "game",
+      "script": "scripts/main.lua"
+    },
+    {
+      "name": "ground",
+      "model": "models/ground.gltf"
+    },
+    {
+      "name": "big_crate",
+      "model": "models/crate.gltf",
+      "position": [0, 0.75, 0],
+      "rotation": [0, 20, 0],
+      "scale": 1.5
+    },
+    {
+      "name": "gem",
+      "model": "models/gem.gltf",
+      "position": [0, 2.6, 0],
+      "script": "scripts/spinner.lua",
+      "params": { "speed": 90, "bob": 0.25, "bob_speed": 2 }
+    },
+    {
+      "name": "ring",
+      "script": "scripts/spawner.lua",
+      "params": { "count": 10, "radius": 5 }
+    }
+  ]
+}
