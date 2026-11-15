@@ -247,15 +247,23 @@ impl ApplicationHandler for App {
                     r.resize(size.width, size.height);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let pressed = event.state == ElementState::Pressed;
-                    self.shared
-                        .input
-                        .borrow_mut()
-                        .on_key(code, pressed, event.repeat);
+                    self.shared.input.borrow_mut().on_key(
+                        code,
+                        pressed,
+                        event.repeat,
+                        is_synthetic,
+                    );
                     // Alt+Enter toggles fullscreen.
                     if pressed
+                        && !is_synthetic
+                        && !event.repeat
                         && code == KeyCode::Enter
                         && self.shared.input.borrow().key_down("alt")
                     {
