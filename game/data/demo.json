@@ -1,0 +1,4 @@
+{
+  "message": "Welcome to the Basalt demo! WASD to fly, hold right mouse or press Tab to look, F / left click to throw crates, R to reload the level, Esc to quit.",
+  "fire_speed": 16
+}

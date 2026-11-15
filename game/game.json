@@ -1,0 +1,12 @@
+{
+  "title": "Basalt Demo",
+  "start_level": "levels/main.json",
+  "window": {
+    "width": 1280,
+    "height": 720,
+    "vsync": true,
+    "resizable": true,
+    "fullscreen": false
+  },
+  "hot_reload": true
+}
