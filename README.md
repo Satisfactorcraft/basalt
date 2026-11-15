@@ -57,7 +57,8 @@ the game folder and can't escape it (`../` out of the folder is an error).
   "title": "My Game",
   "start_level": "levels/main.json",
   "window": { "width": 1280, "height": 720, "vsync": true, "resizable": true, "fullscreen": false },
-  "hot_reload": true
+  "hot_reload": true,
+  "dev_mode": false
 }
 ```
 
@@ -153,10 +154,12 @@ game folders you trust.
 | a model / texture | GPU caches flush and models reload |
 | `game.json` | needs a restart (logged) |
 
-### Dev keys
+### Hotkeys
 
-- **F5**: reload the current level
-- **Alt+Enter**: toggle fullscreen
+- **Alt+Enter**: toggle fullscreen (always on)
+- **F5**: reload the current level, only with `"dev_mode": true` in
+  `game.json`. It's off by default so players of a shipped game can't wipe
+  the level by accident, and games are free to bind F5 themselves.
 
 ## The demo
 

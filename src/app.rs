@@ -119,8 +119,8 @@ impl App {
 
         self.handle_file_changes();
 
-        // Built-in dev key: F5 reloads the current level.
-        if self.shared.input.borrow().key_pressed("f5") {
+        // Dev hotkey (dev_mode only): F5 reloads the current level.
+        if self.config.dev_mode && self.shared.input.borrow().key_pressed("f5") {
             self.reload_level();
         }
 
