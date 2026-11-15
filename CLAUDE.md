@@ -49,3 +49,22 @@
 - For Lua-side repros, add a throwaway `#[test]` using the `game()` helper in
   `src/scripting/mod.rs` tests, in a scratch copy of the source, built with
   `CARGO_TARGET_DIR=<repo>/target` so it reuses the compiled deps.
+
+## Lessons learned (bug-fix round, #2–#17)
+- Windows CAN be tested here: install `wine64`, then
+  `WINEDEBUG=-all CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine cargo test --target x86_64-pc-windows-gnu`.
+  It runs the full test suite as a real .exe. (No Vulkan under wine; tests only.)
+- Minimize/focus behavior needs a window manager: run `openbox &` on the
+  Xvfb display, then `xdotool windowminimize`. Find the window with
+  `xdotool search --pid $(pgrep -x basalt)`, not `--name` (stale ids).
+- Harness traps that produced false results: `pgrep -f` matches the
+  `timeout` wrapper (use `pgrep -x basalt`); `cargo test` does not rebuild
+  `target/debug/basalt` (run `cargo build` before manual runs); a
+  non-executable fake `glslc` on PATH is skipped and the real one is found
+  (build a PATH dir of symlinks without it instead); `timeout ... | grep`
+  can kill the pipe before grep prints (write to a log file first).
+- Debug input issues by temporarily eprintln-ing `WindowEvent`s; winit's
+  `is_synthetic` and X11 auto-repeat were only visible that way.
+- Script engine structure: class cache + pending instances live in
+  `Shared` so Lua callbacks (`scene.spawn`) can create instances; never
+  hold a `RefCell` borrow across Lua calls (script top-level code can spawn).
