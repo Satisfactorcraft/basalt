@@ -271,3 +271,26 @@ fn to_rgba8(img: &gltf::image::Data) -> Result<Image2d> {
         rgba,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::vfs::GameFs;
+
+    /// Loads the demo models through GameFs the way the renderer does. The
+    /// crate's texture is referenced as `../textures/crate.png`, which is what
+    /// broke with verbatim `\\?\` roots on Windows (#3).
+    #[test]
+    fn demo_models_load_with_relative_textures() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("game");
+        let fs = GameFs::new(&root).unwrap();
+        assert!(!fs.root().to_string_lossy().starts_with(r"\\?\"));
+        for name in ["crate", "ground", "gem"] {
+            let model = super::load_gltf(&fs.resolve(&format!("models/{name}.gltf")).unwrap())
+                .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(!model.primitives.is_empty());
+        }
+        let crate_model = super::load_gltf(&fs.resolve("models/crate.gltf").unwrap()).unwrap();
+        assert_eq!(crate_model.images.len(), 1, "crate texture should load");
+        assert!(crate_model.materials[0].image.is_some());
+    }
+}
