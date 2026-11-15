@@ -45,6 +45,8 @@ struct FrameData {
 struct DrawPush {
     model: [f32; 16],
     base_color: [f32; 4],
+    /// x = alpha cutoff (negative: opaque, alpha ignored)
+    material: [f32; 4],
 }
 
 struct Frame {
@@ -245,6 +247,15 @@ impl Renderer {
         self.needs_resize = true;
     }
 
+    fn surface_extent_is_zero(&self) -> Result<bool> {
+        let caps = unsafe {
+            self.ctx
+                .surface_loader
+                .get_physical_device_surface_capabilities(self.ctx.physical, self.ctx.surface)?
+        };
+        Ok(caps.current_extent.width == 0 || caps.current_extent.height == 0)
+    }
+
     fn recreate_swapchain(&mut self) -> Result<()> {
         self.ctx.wait_idle();
         let old = match self.swapchain.take() {
@@ -332,8 +343,7 @@ impl Renderer {
                 .scissor_count(1);
             let raster = vk::PipelineRasterizationStateCreateInfo::default()
                 .polygon_mode(vk::PolygonMode::FILL)
-                .cull_mode(vk::CullModeFlags::BACK)
-                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+                // Cull mode and front face are dynamic (set per draw).
                 .line_width(1.0);
             let multisample = vk::PipelineMultisampleStateCreateInfo::default()
                 .rasterization_samples(vk::SampleCountFlags::TYPE_1);
@@ -345,7 +355,12 @@ impl Renderer {
                 .color_write_mask(vk::ColorComponentFlags::RGBA)];
             let blend =
                 vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
-            let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let dynamic_states = [
+                vk::DynamicState::VIEWPORT,
+                vk::DynamicState::SCISSOR,
+                vk::DynamicState::CULL_MODE,
+                vk::DynamicState::FRONT_FACE,
+            ];
             let dynamic =
                 vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
             let color_formats = [color];
@@ -465,6 +480,8 @@ impl Renderer {
                 model.materials.push(GpuMaterial {
                     set,
                     base_color: mat.base_color,
+                    alpha_cutoff: mat.alpha_cutoff,
+                    double_sided: mat.double_sided,
                 });
             }
             Ok(())
@@ -483,6 +500,11 @@ impl Renderer {
             return Ok(()); // minimized
         }
         if self.needs_resize || self.swapchain.is_none() {
+            // The surface can report 0x0 (minimized) before we get the
+            // Resized event; creating a swapchain then is invalid.
+            if self.surface_extent_is_zero()? {
+                return Ok(());
+            }
             self.recreate_swapchain()?;
         }
 
@@ -662,9 +684,25 @@ impl Renderer {
                         &[mat.set],
                         &[],
                     );
+                    let model_matrix = *world_matrix * prim.transform;
+                    let cull = if mat.double_sided {
+                        vk::CullModeFlags::NONE
+                    } else {
+                        vk::CullModeFlags::BACK
+                    };
+                    // A mirroring transform (negative determinant, e.g. a
+                    // negative scale) reverses triangle winding.
+                    let front = if model_matrix.determinant() < 0.0 {
+                        vk::FrontFace::CLOCKWISE
+                    } else {
+                        vk::FrontFace::COUNTER_CLOCKWISE
+                    };
+                    device.cmd_set_cull_mode(cmd, cull);
+                    device.cmd_set_front_face(cmd, front);
                     let push = DrawPush {
-                        model: (*world_matrix * prim.transform).to_cols_array(),
+                        model: model_matrix.to_cols_array(),
                         base_color: mat.base_color.into(),
+                        material: [mat.alpha_cutoff, 0.0, 0.0, 0.0],
                     };
                     device.cmd_push_constants(
                         cmd,

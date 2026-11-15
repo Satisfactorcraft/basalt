@@ -28,6 +28,11 @@ pub struct Primitive {
 
 pub struct CpuMaterial {
     pub base_color: Vec4,
+    /// Fragments with alpha below this are discarded. Negative = opaque
+    /// (alpha ignored), per glTF `alphaMode: OPAQUE`.
+    pub alpha_cutoff: f32,
+    /// Render both faces (no back-face culling).
+    pub double_sided: bool,
     /// Index into `CpuModel::images`.
     pub image: Option<usize>,
 }
@@ -43,6 +48,8 @@ pub struct CpuModel {
 pub struct GpuMaterial {
     pub set: vk::DescriptorSet,
     pub base_color: Vec4,
+    pub alpha_cutoff: f32,
+    pub double_sided: bool,
 }
 
 pub struct GpuModel {
@@ -100,14 +107,30 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
             }
             image_map[i]
         });
+        let alpha_cutoff = match mat.alpha_mode() {
+            gltf::material::AlphaMode::Opaque => -1.0,
+            gltf::material::AlphaMode::Mask => mat.alpha_cutoff().unwrap_or(0.5),
+            gltf::material::AlphaMode::Blend => {
+                warn!(
+                    "{}: material '{}' uses alphaMode BLEND, which isn't supported yet; rendering it alpha-tested at 0.5",
+                    path.display(),
+                    mat.name().unwrap_or("?")
+                );
+                0.5
+            }
+        };
         model.materials.push(CpuMaterial {
             base_color: Vec4::from(pbr.base_color_factor()),
+            alpha_cutoff,
+            double_sided: mat.double_sided(),
             image,
         });
     }
     let default_material = model.materials.len();
     model.materials.push(CpuMaterial {
         base_color: Vec4::ONE,
+        alpha_cutoff: -1.0,
+        double_sided: false,
         image: None,
     });
 
@@ -247,4 +270,27 @@ fn to_rgba8(img: &gltf::image::Data) -> Result<Image2d> {
         height: img.height,
         rgba,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::vfs::GameFs;
+
+    /// Loads the demo models through GameFs the way the renderer does. The
+    /// crate's texture is referenced as `../textures/crate.png`, which is what
+    /// broke with verbatim `\\?\` roots on Windows (#3).
+    #[test]
+    fn demo_models_load_with_relative_textures() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("game");
+        let fs = GameFs::new(&root).unwrap();
+        assert!(!fs.root().to_string_lossy().starts_with(r"\\?\"));
+        for name in ["crate", "ground", "gem"] {
+            let model = super::load_gltf(&fs.resolve(&format!("models/{name}.gltf")).unwrap())
+                .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(!model.primitives.is_empty());
+        }
+        let crate_model = super::load_gltf(&fs.resolve("models/crate.gltf").unwrap()).unwrap();
+        assert_eq!(crate_model.images.len(), 1, "crate texture should load");
+        assert!(crate_model.materials[0].image.is_some());
+    }
 }

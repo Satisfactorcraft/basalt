@@ -10,6 +10,7 @@
 //! function Spinner:on_update(dt) self.entity:rotate_y(90 * dt) end
 //! function Spinner:on_destroy() end
 //! function Spinner:on_reload() end   -- called after hot reload
+//! function Spinner:on_file_changed(path) end  -- any game file saved
 //! return Spinner
 //! ```
 //!
@@ -41,7 +42,6 @@ pub struct Requests {
     pub quit: bool,
     pub cursor_lock: Option<bool>,
     pub set_title: Option<String>,
-    pub new_scripts: Vec<EntityId>,
 }
 
 /// Engine state scripts can see. Shared between Rust and Lua callbacks.
@@ -52,6 +52,27 @@ pub struct Shared {
     pub requests: RefCell<Requests>,
     pub window_size: Cell<(u32, u32)>,
     pub cursor_locked: Cell<bool>,
+    /// Compiled script classes by path; `None` = failed to compile.
+    /// Lives here (not in ScriptHost) so `scene.spawn` can build instances.
+    classes: RefCell<HashMap<String, Option<LuaTable>>>,
+    /// Instances created by `scene.spawn` mid-update, adopted by the host
+    /// at the end of the update pass.
+    pending: RefCell<Vec<(EntityId, Instance)>>,
+}
+
+impl Shared {
+    pub fn new(fs: GameFs, window_size: (u32, u32)) -> Self {
+        Self {
+            fs,
+            world: RefCell::new(World::default()),
+            input: RefCell::new(Input::default()),
+            requests: RefCell::new(Requests::default()),
+            window_size: Cell::new(window_size),
+            cursor_locked: Cell::new(false),
+            classes: RefCell::new(HashMap::new()),
+            pending: RefCell::new(Vec::new()),
+        }
+    }
 }
 
 struct Instance {
@@ -67,7 +88,6 @@ struct Instance {
 pub struct ScriptHost {
     lua: Lua,
     shared: Rc<Shared>,
-    classes: HashMap<String, Option<LuaTable>>,
     instances: HashMap<EntityId, Instance>,
     order: Vec<EntityId>,
     builtin_modules: HashSet<String>,
@@ -76,6 +96,115 @@ pub struct ScriptHost {
     reported: HashSet<(String, String)>,
     elapsed: f64,
     frame: u64,
+}
+
+/// Returns the compiled class for a script, compiling it on first use.
+/// No borrow is held while compiling: the script's top-level code may
+/// itself spawn scripted entities.
+fn load_class(lua: &Lua, shared: &Shared, path: &str) -> Option<LuaTable> {
+    if let Some(c) = shared.classes.borrow().get(path) {
+        return c.clone();
+    }
+    let class = match compile_class(lua, shared, path) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            error!("{e:#}");
+            None
+        }
+    };
+    shared
+        .classes
+        .borrow_mut()
+        .insert(path.to_string(), class.clone());
+    class
+}
+
+fn compile_class(lua: &Lua, shared: &Shared, path: &str) -> Result<LuaTable> {
+    let source = shared.fs.read_string(path)?;
+    let value: Value = lua.load(&source).set_name(format!("@{path}")).eval()?;
+    match value {
+        Value::Table(t) => Ok(t),
+        other => bail!(
+            "{path}: script must `return` a table, got {}",
+            other.type_name()
+        ),
+    }
+}
+
+/// Builds an entity's script instance and registers it so
+/// `entity:script()` works immediately. `params` is used as-is (any Lua
+/// value); nil becomes an empty table.
+fn new_instance(
+    lua: &Lua,
+    shared: &Shared,
+    id: EntityId,
+    script: String,
+    name: String,
+    params: Value,
+) -> LuaResult<Instance> {
+    let class = load_class(lua, shared, &script);
+    let table = lua.create_table()?;
+    table.set("entity", LuaEntity(id))?;
+    table.set("name", name)?;
+    let params = match params {
+        Value::Nil => Value::Table(lua.create_table()?),
+        p => p,
+    };
+    table.set("params", params)?;
+
+    let meta = lua.create_table()?;
+    let has_class = class.is_some();
+    meta.set("__index", class.unwrap_or(lua.create_table()?))?;
+    table.set_metatable(Some(meta.clone()))?;
+
+    let instances: LuaTable = lua.named_registry_value(INSTANCES_KEY)?;
+    instances.set(id.key(), table.clone())?;
+    Ok(Instance {
+        script,
+        table,
+        meta,
+        has_class,
+        started: false,
+        failed: !has_class,
+    })
+}
+
+/// `package.searchers` entry: resolves a module name inside `scripts/`.
+/// Returns the compiled chunk plus its path, or a "not found" message.
+fn search_module(lua: &Lua, name: String) -> LuaResult<MultiValue> {
+    let shared = types::shared(lua);
+    let base = name.replace('.', "/");
+    let mut tried = Vec::new();
+    for candidate in [
+        format!("scripts/{base}.lua"),
+        format!("scripts/{base}/init.lua"),
+    ] {
+        // normalize() rejects absolute paths and escaping the game folder;
+        // also refuse anything that resolves outside scripts/.
+        let Ok(path) = GameFs::normalize(&candidate) else {
+            continue;
+        };
+        if !path.starts_with("scripts/") {
+            continue;
+        }
+        if !shared.fs.exists(&path) {
+            tried.push(format!("\n\tno file '{path}'"));
+            continue;
+        }
+        let source = shared
+            .fs
+            .read_string(&path)
+            .map_err(|e| LuaError::runtime(format!("{e:#}")))?;
+        let chunk = lua
+            .load(&source)
+            .set_name(format!("@{path}"))
+            .into_function()?;
+        return (chunk, path).into_lua_multi(lua);
+    }
+    if tried.is_empty() {
+        tried.push(format!("\n\tinvalid module name '{name}'"));
+    }
+    tried.concat().into_lua_multi(lua)
 }
 
 impl ScriptHost {
@@ -107,13 +236,22 @@ impl ScriptHost {
             os.set(name, Value::Nil)?;
         }
 
-        // `require("foo.bar")` loads scripts/foo/bar.lua from the game folder.
-        let scripts = shared.fs.root().join("scripts");
-        let scripts = scripts.to_string_lossy();
+        // `require("foo.bar")` loads scripts/foo/bar.lua (or foo/bar/init.lua)
+        // through GameFs. The stock searchers read package.path/cpath, which
+        // scripts can rewrite to load files from anywhere, so they're replaced
+        // outright and package.path is irrelevant.
         let package: LuaTable = g.get("package")?;
-        package.set("path", format!("{scripts}/?.lua;{scripts}/?/init.lua"))?;
+        let searchers = lua.create_table()?;
+        searchers.raw_set(
+            1,
+            package.get::<LuaTable>("searchers")?.raw_get::<Value>(1)?,
+        )?; // preload
+        searchers.raw_set(2, lua.create_function(search_module)?)?;
+        package.set("searchers", searchers)?;
+        package.set("path", "")?;
         package.set("cpath", "")?;
         package.set("loadlib", Value::Nil)?;
+        package.set("searchpath", Value::Nil)?;
 
         api::install(&lua)?;
         lua.set_named_registry_value(INSTANCES_KEY, lua.create_table()?)?;
@@ -127,7 +265,6 @@ impl ScriptHost {
         Ok(Self {
             lua,
             shared,
-            classes: HashMap::new(),
             instances: HashMap::new(),
             order: Vec::new(),
             builtin_modules,
@@ -170,8 +307,9 @@ impl ScriptHost {
     }
 
     fn unload_all(&mut self) {
+        self.attach_pending();
         for id in self.order.clone() {
-            self.call(id, "on_destroy", ());
+            self.destroy_hook(id);
         }
         self.instances.clear();
         self.order.clear();
@@ -179,7 +317,14 @@ impl ScriptHost {
             let _ = self.lua.set_named_registry_value(INSTANCES_KEY, t);
         }
         self.shared.world.borrow_mut().clear();
-        self.shared.requests.borrow_mut().new_scripts.clear();
+        self.shared.pending.borrow_mut().clear();
+    }
+
+    /// on_destroy only pairs with an on_start that actually ran.
+    fn destroy_hook(&mut self, id: EntityId) {
+        if self.instances.get(&id).is_some_and(|i| i.started) {
+            self.call(id, "on_destroy", ());
+        }
     }
 
     // -- per-frame ------------------------------------------------------------
@@ -196,24 +341,19 @@ impl ScriptHost {
 
         self.order.retain(|id| self.instances.contains_key(id));
         for id in self.order.clone() {
-            let alive = self
-                .shared
-                .world
-                .borrow()
-                .get(id)
-                .is_some_and(|e| !e.pending_destroy);
-            if !alive {
+            if !self.runnable(id) {
                 continue;
             }
             let Some(inst) = self.instances.get_mut(&id) else {
                 continue;
             };
-            if inst.failed {
-                continue;
-            }
             if !inst.started {
                 inst.started = true;
                 self.call(id, "on_start", ());
+                // on_start may have errored or destroyed its own entity.
+                if !self.runnable(id) {
+                    continue;
+                }
             }
             self.call(id, "on_update", dt);
         }
@@ -222,10 +362,23 @@ impl ScriptHost {
         self.flush_destroyed();
     }
 
+    /// The entity is alive and its script instance isn't paused by an error.
+    fn runnable(&self, id: EntityId) -> bool {
+        let alive = self
+            .shared
+            .world
+            .borrow()
+            .get(id)
+            .is_some_and(|e| !e.pending_destroy);
+        alive && self.instances.get(&id).is_some_and(|i| !i.failed)
+    }
+
+    /// Adopts instances that `scene.spawn` created during the update.
     fn attach_pending(&mut self) {
-        let pending = std::mem::take(&mut self.shared.requests.borrow_mut().new_scripts);
-        for id in pending {
-            self.attach(id);
+        let pending = std::mem::take(&mut *self.shared.pending.borrow_mut());
+        for (id, inst) in pending {
+            self.instances.insert(id, inst);
+            self.order.push(id);
         }
     }
 
@@ -243,7 +396,7 @@ impl ScriptHost {
                 return;
             }
             for id in doomed {
-                self.call(id, "on_destroy", ());
+                self.destroy_hook(id);
                 self.detach(id);
                 self.shared.world.borrow_mut().despawn(id);
             }
@@ -267,37 +420,12 @@ impl ScriptHost {
             };
             (script, e.params.clone(), e.name.clone())
         };
-        let class = self.class(&script);
-
-        let lua = &self.lua;
-        let table = lua.create_table()?;
-        table.set("entity", LuaEntity(id))?;
-        table.set("name", name)?;
         let params = match params {
-            serde_json::Value::Null => Value::Table(lua.create_table()?),
-            p => lua.to_value_with(&p, api::json_options())?,
+            serde_json::Value::Null => Value::Nil,
+            p => self.lua.to_value_with(&p, api::json_options())?,
         };
-        table.set("params", params)?;
-
-        let meta = lua.create_table()?;
-        let has_class = class.is_some();
-        meta.set("__index", class.unwrap_or(lua.create_table()?))?;
-        table.set_metatable(Some(meta.clone()))?;
-
-        let instances: LuaTable = lua.named_registry_value(INSTANCES_KEY)?;
-        instances.set(id.key(), table.clone())?;
-
-        self.instances.insert(
-            id,
-            Instance {
-                script,
-                table,
-                meta,
-                has_class,
-                started: false,
-                failed: !has_class,
-            },
-        );
+        let inst = new_instance(&self.lua, &self.shared, id, script, name, params)?;
+        self.instances.insert(id, inst);
         self.order.push(id);
         Ok(())
     }
@@ -335,30 +463,17 @@ impl ScriptHost {
 
     // -- classes --------------------------------------------------------------
 
-    fn class(&mut self, path: &str) -> Option<LuaTable> {
-        if let Some(c) = self.classes.get(path) {
-            return c.clone();
-        }
-        let class = match self.compile(path) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                error!("{e:#}");
-                None
+    /// Calls `on_file_changed(path)` on every running script instance, once
+    /// per changed game-relative path.
+    pub fn notify_file_changed(&mut self, paths: &[String]) {
+        for id in self.order.clone() {
+            for path in paths {
+                let started = self.instances.get(&id).is_some_and(|i| i.started);
+                if !started || !self.runnable(id) {
+                    break;
+                }
+                self.call(id, "on_file_changed", path.clone());
             }
-        };
-        self.classes.insert(path.to_string(), class.clone());
-        class
-    }
-
-    fn compile(&self, path: &str) -> Result<LuaTable> {
-        let source = self.shared.fs.read_string(path)?;
-        let value: Value = self.lua.load(&source).set_name(format!("@{path}")).eval()?;
-        match value {
-            Value::Table(t) => Ok(t),
-            other => bail!(
-                "{path}: script must `return` a table, got {}",
-                other.type_name()
-            ),
         }
     }
 
@@ -382,12 +497,12 @@ impl ScriptHost {
             }
         }
 
-        let paths: Vec<String> = self.classes.keys().cloned().collect();
+        let paths: Vec<String> = self.shared.classes.borrow().keys().cloned().collect();
         let mut reloaded = 0;
         for path in paths {
-            match self.compile(&path) {
+            match compile_class(&self.lua, &self.shared, &path) {
                 Ok(t) => {
-                    self.classes.insert(path, Some(t));
+                    self.shared.classes.borrow_mut().insert(path, Some(t));
                     reloaded += 1;
                 }
                 // Keep the old version running if the new one is broken.
@@ -396,8 +511,9 @@ impl ScriptHost {
         }
 
         let mut to_notify = Vec::new();
+        let classes = self.shared.classes.borrow();
         for (id, inst) in self.instances.iter_mut() {
-            let Some(Some(class)) = self.classes.get(&inst.script) else {
+            let Some(Some(class)) = classes.get(&inst.script) else {
                 continue;
             };
             if inst.meta.set("__index", class.clone()).is_err() {
@@ -412,6 +528,7 @@ impl ScriptHost {
                 to_notify.push(*id);
             }
         }
+        drop(classes);
         for id in to_notify {
             self.call(id, "on_reload", ());
         }
@@ -439,14 +556,7 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, text).unwrap();
         }
-        let shared = Rc::new(Shared {
-            fs: GameFs::new(&root).unwrap(),
-            world: RefCell::new(World::default()),
-            input: RefCell::new(Input::default()),
-            requests: RefCell::new(Requests::default()),
-            window_size: Cell::new((800, 600)),
-            cursor_locked: Cell::new(false),
-        });
+        let shared = Rc::new(Shared::new(GameFs::new(&root).unwrap(), (800, 600)));
         let host = ScriptHost::new(shared).unwrap();
         (TempGame(root), host)
     }
@@ -559,7 +669,15 @@ mod tests {
 
     #[test]
     fn sandbox() {
-        let (_g, host) = game("sandbox", &[("game.json", "{}")]);
+        let (_g, host) = game(
+            "sandbox",
+            &[
+                ("game.json", "{}"),
+                ("game.lua", "return 'not a script module'"),
+                ("scripts/ok.lua", "return 7"),
+                ("scripts/pkg/init.lua", "return 8"),
+            ],
+        );
         let lua = &host.lua;
         assert!(lua.load("return io").eval::<Value>().unwrap().is_nil());
         assert!(lua
@@ -572,11 +690,137 @@ mod tests {
             .load("return game.read_file('../../etc/passwd')")
             .eval::<Value>()
             .is_err());
+        // #2: rewriting package.path must not let require() leave scripts/.
+        let outside =
+            std::env::temp_dir().join(format!("basalt_escape_{}.lua", std::process::id()));
+        std::fs::write(&outside, "return 'ESCAPED'").unwrap();
+        let dir = outside
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let stem = outside.file_stem().unwrap().to_string_lossy().to_string();
+        let escape = lua
+            .load(format!(
+                "package.path = '{dir}/?.lua'; return require('{stem}')"
+            ))
+            .eval::<String>();
+        std::fs::remove_file(&outside).unwrap();
+        assert!(
+            escape.is_err(),
+            "require escaped the game folder: {escape:?}"
+        );
+        assert!(lua
+            .load("return package.searchpath")
+            .eval::<Value>()
+            .unwrap()
+            .is_nil());
+        assert!(lua
+            .load("return require('x/../../game')")
+            .eval::<Value>()
+            .is_err());
+        assert_eq!(lua.load("return require('ok')").eval::<i64>().unwrap(), 7);
+        assert_eq!(lua.load("return require('pkg')").eval::<i64>().unwrap(), 8);
         assert_eq!(
             lua.load("return game.read_file('game.json')")
                 .eval::<String>()
                 .unwrap(),
             "{}"
+        );
+    }
+
+    #[test]
+    fn no_update_after_failed_or_destroying_start() {
+        let (_g, mut host) = game(
+            "start-fail",
+            &[
+                (
+                    "levels/l.json",
+                    r#"{"entities":[{"script":"scripts/a.lua"},{"script":"scripts/b.lua"}]}"#,
+                ),
+                (
+                    "scripts/a.lua",
+                    "local A = {} function A:on_start() error('x') end function A:on_update() A_UPDATED = true end return A",
+                ),
+                (
+                    "scripts/b.lua",
+                    "local B = {} function B:on_start() self.entity:destroy() end function B:on_update() B_UPDATED = true end return B",
+                ),
+            ],
+        );
+        host.load_level("levels/l.json").unwrap();
+        host.update(0.016);
+        host.update(0.016);
+        assert!(global::<Option<bool>>(&host, "A_UPDATED").is_none());
+        assert!(global::<Option<bool>>(&host, "B_UPDATED").is_none());
+    }
+
+    #[test]
+    fn eq_across_userdata_types() {
+        let (_g, host) = game("eq", &[("game.json", "{}")]);
+        let r: (bool, bool, bool, bool) = host
+            .lua
+            .load("local e = scene.spawn{} local v = vec3(1) return e == v, v == e, e == e, v == vec3(1)")
+            .eval()
+            .unwrap();
+        assert_eq!(r, (false, false, true, true));
+    }
+
+    #[test]
+    fn spawn_params_are_lua_values_and_script_is_immediate() {
+        let (_g, mut host) = game(
+            "spawn",
+            &[(
+                "scripts/e.lua",
+                "local E = {} function E:on_start() SEEN_DIR = self.params.dir; SEEN_TARGET = self.params.target end return E",
+            )],
+        );
+        let ok: bool = host
+            .lua
+            .load(
+                r#"
+                local boss = scene.spawn{ name = "boss" }
+                local e = scene.spawn{ script = "scripts/e.lua", params = { dir = vec3(1, 2, 3), target = boss } }
+                local inst = e:script()
+                assert(inst ~= nil, "script() should work right after spawn")
+                inst.configured = true
+                return inst.params.dir == vec3(1, 2, 3) and inst.params.target == boss
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(ok);
+        host.update(0.016);
+        let dir: types::LuaVec3 = global(&host, "SEEN_DIR");
+        assert_eq!(dir.0, glam::Vec3::new(1.0, 2.0, 3.0));
+        assert!(host
+            .lua
+            .load("return scene.find('entity_2'):script().configured")
+            .eval::<bool>()
+            .unwrap());
+    }
+
+    #[test]
+    fn on_file_changed_hook() {
+        let (_g, mut host) = game(
+            "filechanged",
+            &[
+                ("levels/l.json", r#"{"entities":[{"script":"scripts/w.lua"}]}"#),
+                (
+                    "scripts/w.lua",
+                    "local W = {} function W:on_file_changed(p) SEEN = (SEEN or '') .. p .. ';' end return W",
+                ),
+            ],
+        );
+        host.load_level("levels/l.json").unwrap();
+        // Not started yet: no notification.
+        host.notify_file_changed(&["data/a.json".into()]);
+        assert!(global::<Option<String>>(&host, "SEEN").is_none());
+        host.update(0.016);
+        host.notify_file_changed(&["data/a.json".into(), "textures/b.png".into()]);
+        assert_eq!(
+            global::<String>(&host, "SEEN"),
+            "data/a.json;textures/b.png;"
         );
     }
 }

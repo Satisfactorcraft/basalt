@@ -15,6 +15,9 @@ pub struct GameConfig {
     pub window: WindowConfig,
     /// Watch the game folder and reload scripts, levels and assets on change.
     pub hot_reload: bool,
+    /// Enables developer hotkeys (F5 = reload level). Off by default so a
+    /// shipped game can't be reset by a stray key press.
+    pub dev_mode: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,6 +37,7 @@ impl Default for GameConfig {
             start_level: "levels/main.json".into(),
             window: WindowConfig::default(),
             hot_reload: true,
+            dev_mode: false,
         }
     }
 }

@@ -8,5 +8,6 @@
     "resizable": true,
     "fullscreen": false
   },
-  "hot_reload": true
+  "hot_reload": true,
+  "dev_mode": true
 }

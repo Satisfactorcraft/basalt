@@ -206,9 +206,9 @@ pub fn install(lua: &Lua) -> LuaResult<()> {
     input.set(
         "lock_cursor",
         lua.create_function(|lua, locked: bool| {
-            let s = shared(lua);
-            s.cursor_locked.set(locked);
-            s.requests.borrow_mut().cursor_lock = Some(locked);
+            // Applied by the app after the update; cursor_locked() reports
+            // the real outcome from then on.
+            shared(lua).requests.borrow_mut().cursor_lock = Some(locked);
             Ok(())
         })?,
     )?;
@@ -319,22 +319,30 @@ fn spawn(lua: &Lua, def: LuaTable) -> LuaResult<LuaEntity> {
         .map_err(rt)?;
     if let Some(cam) = def.get::<Option<LuaTable>>("camera")? {
         let d = Camera::default();
-        e.camera = Some(Camera {
+        let camera = Camera {
             fov: cam.get::<Option<f32>>("fov")?.unwrap_or(d.fov),
             near: cam.get::<Option<f32>>("near")?.unwrap_or(d.near),
             far: cam.get::<Option<f32>>("far")?.unwrap_or(d.far),
-        });
+        };
+        camera.validate().map_err(rt)?;
+        e.camera = Some(camera);
     }
-    match def.get::<Value>("params")? {
-        Value::Nil => {}
-        v => e.params = lua.from_value(v)?,
-    }
+    // Params stay a Lua value (no JSON round trip), so they can hold
+    // vec3s, entity handles, functions, etc.
+    let params: Value = def.get("params")?;
 
-    let has_script = e.script.is_some();
+    let script = e.script.clone();
     let s = shared(lua);
     let id = s.world.borrow_mut().spawn(e);
-    if has_script {
-        s.requests.borrow_mut().new_scripts.push(id);
+    if let Some(script) = script {
+        let name = s
+            .world
+            .borrow()
+            .get(id)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        let inst = super::new_instance(lua, &s, id, script, name, params)?;
+        s.pending.borrow_mut().push((id, inst));
     }
     Ok(LuaEntity(id))
 }

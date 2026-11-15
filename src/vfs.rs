@@ -12,8 +12,10 @@ pub struct GameFs {
 
 impl GameFs {
     pub fn new(root: &Path) -> Result<Self> {
-        let root = root
-            .canonicalize()
+        // dunce: on Windows std's canonicalize returns verbatim `\\?\C:\..`
+        // paths, which disable `/` and `..` handling for anything joined onto
+        // them (e.g. glTF texture URIs like `../textures/x.png`).
+        let root = dunce::canonicalize(root)
             .with_context(|| format!("game folder {} not found", root.display()))?;
         if !root.is_dir() {
             bail!("{} is not a folder", root.display());

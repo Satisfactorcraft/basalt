@@ -2,9 +2,20 @@
 local Game = {}
 
 function Game:on_start()
+  self:load_settings()
+end
+
+function Game:load_settings()
   local settings = json.decode(game.read_file("data/demo.json"))
   log.info(settings.message)
   self.fire_speed = settings.fire_speed or 15
+end
+
+-- Hot reload for data files: edit data/demo.json while the game runs.
+function Game:on_file_changed(path)
+  if path == "data/demo.json" then
+    self:load_settings()
+  end
 end
 
 function Game:on_update(dt)
@@ -35,7 +46,7 @@ function Game:throw_crate()
     position = cam.position + f,
     scale = 0.4,
     script = "scripts/projectile.lua",
-    params = { velocity = { v.x, v.y, v.z } },
+    params = { velocity = v },
   }
 end
 

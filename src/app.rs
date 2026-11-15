@@ -1,10 +1,9 @@
 //! Window, event loop and the per-frame order of things:
 //! input -> hot reload -> scripts -> engine requests -> render.
 
-use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{error, info, warn};
@@ -17,24 +16,18 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::config::{GameConfig, CONFIG_FILE};
 use crate::hot_reload::Watcher;
-use crate::input::Input;
 use crate::renderer::Renderer;
-use crate::scene::World;
-use crate::scripting::{Requests, ScriptHost, Shared};
+use crate::scripting::{ScriptHost, Shared};
 use crate::vfs::GameFs;
 
 pub fn run(fs: GameFs, config: GameConfig) -> Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let shared = Rc::new(Shared {
-        fs: fs.clone(),
-        world: RefCell::new(World::default()),
-        input: RefCell::new(Input::default()),
-        requests: RefCell::new(Requests::default()),
-        window_size: Cell::new((config.window.width, config.window.height)),
-        cursor_locked: Cell::new(false),
-    });
+    let shared = Rc::new(Shared::new(
+        fs.clone(),
+        (config.window.width, config.window.height),
+    ));
     let scripts = ScriptHost::new(shared.clone())?;
     let watcher = if config.hot_reload {
         match Watcher::new(&fs) {
@@ -62,6 +55,7 @@ pub fn run(fs: GameFs, config: GameConfig) -> Result<()> {
         last_frame: Instant::now(),
         fps_timer: Instant::now(),
         fps_frames: 0,
+        next_background_tick: Instant::now(),
         fatal: None,
     };
     event_loop.run_app(&mut app)?;
@@ -83,8 +77,13 @@ struct App {
     last_frame: Instant,
     fps_timer: Instant,
     fps_frames: u32,
+    /// While minimized: when the next throttled (render-less) tick is due.
+    next_background_tick: Instant,
     fatal: Option<anyhow::Error>,
 }
+
+/// Script update rate while the window is minimized.
+const BACKGROUND_TICK: Duration = Duration::from_millis(33);
 
 impl App {
     fn init(&mut self, el: &ActiveEventLoop) -> Result<()> {
@@ -120,15 +119,16 @@ impl App {
 
         self.handle_file_changes();
 
-        // Built-in dev key: F5 reloads the current level.
-        if self.shared.input.borrow().key_pressed("f5") {
+        // Dev hotkey (dev_mode only): F5 reloads the current level.
+        if self.config.dev_mode && self.shared.input.borrow().key_pressed("f5") {
             self.reload_level();
         }
 
         self.scripts.update(dt);
         self.handle_requests(el);
 
-        if let Some(r) = self.renderer.as_mut() {
+        let minimized = self.minimized();
+        if let Some(r) = self.renderer.as_mut().filter(|_| !minimized) {
             if let Err(e) = r.render(&self.shared.world.borrow()) {
                 error!("render failed: {e:#}");
                 self.fatal = Some(e);
@@ -144,6 +144,15 @@ impl App {
             self.fps_timer = Instant::now();
             self.fps_frames = 0;
         }
+    }
+
+    /// Minimized windows can't be presented to; on Windows they're also
+    /// resized to 0x0. Either way, don't render and don't spin.
+    fn minimized(&self) -> bool {
+        self.window.as_ref().is_some_and(|w| {
+            let size = w.inner_size();
+            w.is_minimized() == Some(true) || size.width == 0 || size.height == 0
+        })
     }
 
     fn reload_level(&mut self) {
@@ -189,12 +198,12 @@ impl App {
         if level {
             self.reload_level();
         }
+        // Let scripts react to anything else, e.g. re-read data/*.json.
+        self.scripts.notify_file_changed(&changed);
     }
 
     fn handle_requests(&mut self, el: &ActiveEventLoop) {
         let req = std::mem::take(&mut *self.shared.requests.borrow_mut());
-        // new_scripts is consumed by the script host itself.
-        self.shared.requests.borrow_mut().new_scripts = req.new_scripts;
 
         if let Some(level) = req.load_level {
             if let Err(e) = self.scripts.load_level(&level) {
@@ -213,10 +222,15 @@ impl App {
                 } else {
                     window.set_cursor_grab(CursorGrabMode::None)
                 };
-                if let Err(e) = result {
-                    warn!("cursor lock failed: {e}");
-                }
-                window.set_cursor_visible(!lock);
+                let locked = match result {
+                    Ok(()) => lock,
+                    Err(e) => {
+                        warn!("cursor lock failed: {e}");
+                        false
+                    }
+                };
+                window.set_cursor_visible(!locked);
+                self.shared.cursor_locked.set(locked);
             }
         }
         if req.quit {
@@ -256,15 +270,23 @@ impl ApplicationHandler for App {
                     r.resize(size.width, size.height);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let pressed = event.state == ElementState::Pressed;
-                    self.shared
-                        .input
-                        .borrow_mut()
-                        .on_key(code, pressed, event.repeat);
+                    self.shared.input.borrow_mut().on_key(
+                        code,
+                        pressed,
+                        event.repeat,
+                        is_synthetic,
+                    );
                     // Alt+Enter toggles fullscreen.
                     if pressed
+                        && !is_synthetic
+                        && !event.repeat
                         && code == KeyCode::Enter
                         && self.shared.input.borrow().key_down("alt")
                     {
@@ -312,9 +334,25 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if self.window.is_none() {
+            return;
+        }
+        if self.minimized() {
+            // No vsync to pace us and some platforms stop sending
+            // RedrawRequested, so tick scripts here at a low rate and sleep
+            // in between.
+            let now = Instant::now();
+            if now >= self.next_background_tick {
+                self.frame(el);
+                self.next_background_tick = now + BACKGROUND_TICK;
+            }
+            el.set_control_flow(ControlFlow::WaitUntil(self.next_background_tick));
+        } else {
+            el.set_control_flow(ControlFlow::Poll);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 

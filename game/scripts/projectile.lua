@@ -1,13 +1,12 @@
 -- A thrown crate: gravity, a few bounces, then it destroys itself.
--- params: velocity = {x, y, z}
+-- params: velocity (vec3)
 local Projectile = {}
 
 local GRAVITY = -18
 local LIFETIME = 6
 
 function Projectile:on_start()
-  local v = self.params.velocity or { 0, 0, 0 }
-  self.velocity = vec3(v[1], v[2], v[3])
+  self.velocity = (self.params.velocity or vec3(0)):copy()
   self.age = 0
   self.spin = vec3(math.random() - 0.5, math.random() - 0.5, math.random() - 0.5)
 end

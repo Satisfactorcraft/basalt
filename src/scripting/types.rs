@@ -16,6 +16,14 @@ pub fn shared(lua: &Lua) -> Rc<Shared> {
         .clone()
 }
 
+/// Copies a userdata value out if it has type `T`.
+fn userdata_as<T: UserData + Copy + 'static>(v: &Value) -> Option<T> {
+    match v {
+        Value::UserData(ud) => ud.borrow::<T>().ok().map(|r| *r),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // vec3
 // ---------------------------------------------------------------------------
@@ -129,7 +137,10 @@ impl UserData for LuaVec3 {
             arith(a, b, |a, b| a / b)
         });
         m.add_meta_method(MetaMethod::Unm, |_, v, ()| Ok(LuaVec3(-v.0)));
-        m.add_meta_method(MetaMethod::Eq, |_, v, o: LuaVec3| Ok(v.0 == o.0));
+        // Lua calls __eq for any two userdata; other types compare unequal.
+        m.add_meta_method(MetaMethod::Eq, |_, v, o: Value| {
+            Ok(userdata_as::<LuaVec3>(&o).is_some_and(|o| v.0 == o.0))
+        });
         m.add_meta_method(MetaMethod::ToString, |_, v, ()| {
             Ok(format!("vec3({}, {}, {})", v.0.x, v.0.y, v.0.z))
         });
@@ -347,7 +358,9 @@ impl UserData for LuaEntity {
             instances.get::<Value>(e.0.key())
         });
 
-        m.add_meta_method(MetaMethod::Eq, |_, e, o: LuaEntity| Ok(e.0 == o.0));
+        m.add_meta_method(MetaMethod::Eq, |_, e, o: Value| {
+            Ok(userdata_as::<LuaEntity>(&o).is_some_and(|o| e.0 == o.0))
+        });
         m.add_meta_method(MetaMethod::ToString, |lua, e, ()| {
             let shared = shared(lua);
             let world = shared.world.borrow();

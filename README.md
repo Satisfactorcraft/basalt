@@ -9,7 +9,8 @@ basalt path/to/mygame   # runs any game folder
 
 Everything a game needs (config, levels, models, textures, Lua scripts, data)
 lives in one folder. Ship a game by putting `basalt(.exe)` next to a `game/`
-folder. Edit any file while the game runs and it hot reloads.
+folder. Edit scripts, levels, models and textures while the game runs and
+they hot reload; scripts can react to any other file through `on_file_changed`.
 
 ![demo](docs/demo.png)
 
@@ -28,9 +29,12 @@ NVIDIA/AMD/Intel driver on Windows or Linux). On Linux, X11 needs
 `libxkbcommon-x11` (installed on basically every desktop).
 
 **Shaders:** `build.rs` compiles `shaders/*.vert|frag` with `glslc` if it is on
-your PATH (it ships with the Vulkan SDK). Without it, the committed SPIR-V in
-`shaders/prebuilt/` is used. After editing shaders, run once with
-`BASALT_UPDATE_PREBUILT=1 cargo build` to refresh the prebuilt copies.
+your PATH (it ships with the Vulkan SDK). Without it, or if glslc fails while
+the GLSL is unchanged (e.g. an old SDK), the committed SPIR-V in
+`shaders/prebuilt/` is used. Each prebuilt file has a `.hash` of the GLSL it
+came from, so the build warns loudly if your shader edits can't be compiled.
+After editing shaders, run `BASALT_UPDATE_PREBUILT=1 cargo build` once to
+refresh the prebuilt copies.
 
 Debug builds enable the Vulkan validation layer if it is installed.
 Override with `BASALT_VALIDATION=1` / `0`. More logging: `RUST_LOG=debug`.
@@ -57,7 +61,8 @@ the game folder and can't escape it (`../` out of the folder is an error).
   "title": "My Game",
   "start_level": "levels/main.json",
   "window": { "width": 1280, "height": 720, "vsync": true, "resizable": true, "fullscreen": false },
-  "hot_reload": true
+  "hot_reload": true,
+  "dev_mode": false
 }
 ```
 
@@ -110,12 +115,17 @@ function Spinner:on_update(dt)    -- every frame
 end
 
 function Spinner:on_destroy() end -- entity destroyed or level unloaded
+                                  -- (only if on_start ran)
 function Spinner:on_reload() end  -- after hot reload; self state is kept
+function Spinner:on_file_changed(path) end -- any file in the game folder
+                                  -- was saved (game-relative path)
 
 return Spinner
 ```
 
 Instance fields: `self.entity`, `self.params`, `self.name`.
+
+If `on_start` errors or destroys its own entity, `on_update` doesn't run.
 
 ### Lua API
 
@@ -124,7 +134,7 @@ Instance fields: `self.entity`, `self.params`, `self.name`.
 | **vec3** | `vec3(x, y, z)`, `vec3(s)`; fields `x y z`; `+ - * /` with vec3 or numbers; `:length() :normalized() :dot(v) :cross(v) :distance(v) :lerp(v, t) :copy() :unpack()` |
 | **entity** | fields `name position rotation scale model visible` (read/write), `id`, `script_path`; methods `:valid() :destroy() :translate(v) :translate_local(v) :rotate(axis, deg) :rotate_local(axis, deg) :rotate_x/y/z(deg) :look_at(target, up?) :forward() :right() :up() :script()` |
 | **scene** | `find(name) all() camera() spawn{...} load_level(path) reload_level() level() set_clear_color(r,g,b,a?) set_sun(dir, color?) set_ambient(color)` |
-| **input** | `key_down/pressed/released(name) mouse_down/pressed/released("left"\|"right"\|"middle") mouse_position() mouse_delta() scroll() lock_cursor(bool) cursor_locked()` |
+| **input** | `key_down/pressed/released(name) mouse_down/pressed/released("left"\|"right"\|"middle") mouse_position() mouse_delta() scroll() lock_cursor(bool) cursor_locked()`. The lock applies at the end of the frame; `cursor_locked()` reports whether it actually took effect. |
 | **time** | `time.dt time.elapsed time.frame` |
 | **game** | `quit() read_file(path) file_exists(path) list_dir(path) window_size() set_title(s)` |
 | **json** | `decode(text) encode(value, pretty?)` |
@@ -138,7 +148,12 @@ delete insert home end pageup pagedown left right up down`, `shift ctrl alt`
 
 Positions/rotations are returned as copies: `local p = e.position; p.y = 2;
 e.position = p`. `scene.spawn` takes the same fields as a level entity
-(`position` can be a `vec3` or `{x, y, z}`).
+(`position` can be a `vec3` or `{x, y, z}`). Its `params` can be any Lua
+value (vec3s, entity handles, functions), and the script instance exists right
+away, so `scene.spawn{...}:script()` works immediately. `on_start` runs on
+the next update.
+
+`require` only loads modules from `scripts/`, whatever `package.path` says.
 
 `io`, `debug`, `dofile`, `loadfile`, native modules and the dangerous `os`
 functions are removed. This is a guard rail, not a security boundary: only run
@@ -152,11 +167,16 @@ game folders you trust.
 | the current level `.json` | level reloads. Broken JSON: the current level stays. |
 | a model / texture | GPU caches flush and models reload |
 | `game.json` | needs a restart (logged) |
+| anything else (`data/*.json`, ...) | nothing automatic; every script's `on_file_changed(path)` is called so it can re-read what it needs (the demo's `main.lua` does this for `data/demo.json`) |
 
-### Dev keys
+`on_file_changed` also fires for the cases above, after their reload.
 
-- **F5**: reload the current level
-- **Alt+Enter**: toggle fullscreen
+### Hotkeys
+
+- **Alt+Enter**: toggle fullscreen (always on)
+- **F5**: reload the current level, only with `"dev_mode": true` in
+  `game.json`. It's off by default so players of a shipped game can't wipe
+  the level by accident, and games are free to bind F5 themselves.
 
 ## The demo
 
@@ -181,7 +201,8 @@ shaders/              GLSL (+ prebuilt SPIR-V)
 
 ## Not in v1 (yet)
 
-PBR materials (only base color + texture), normal maps, shadows, transparency
-(alpha is a cutout), skinned/animated meshes, audio, gamepads, physics, UI/text,
+PBR materials (only base color + texture), normal maps, shadows, alpha blending
+(`BLEND` materials render alpha-tested; `OPAQUE`, `MASK` and `doubleSided`
+are supported), skinned/animated meshes, audio, gamepads, physics, UI/text,
 packaging the game folder into an archive. Models stream in on the main thread
 the first time they're drawn, so big models hitch once.
