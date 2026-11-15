@@ -31,6 +31,8 @@ pub struct CpuMaterial {
     /// Fragments with alpha below this are discarded. Negative = opaque
     /// (alpha ignored), per glTF `alphaMode: OPAQUE`.
     pub alpha_cutoff: f32,
+    /// Render both faces (no back-face culling).
+    pub double_sided: bool,
     /// Index into `CpuModel::images`.
     pub image: Option<usize>,
 }
@@ -47,6 +49,7 @@ pub struct GpuMaterial {
     pub set: vk::DescriptorSet,
     pub base_color: Vec4,
     pub alpha_cutoff: f32,
+    pub double_sided: bool,
 }
 
 pub struct GpuModel {
@@ -119,6 +122,7 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
         model.materials.push(CpuMaterial {
             base_color: Vec4::from(pbr.base_color_factor()),
             alpha_cutoff,
+            double_sided: mat.double_sided(),
             image,
         });
     }
@@ -126,6 +130,7 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
     model.materials.push(CpuMaterial {
         base_color: Vec4::ONE,
         alpha_cutoff: -1.0,
+        double_sided: false,
         image: None,
     });
 

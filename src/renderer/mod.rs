@@ -334,8 +334,7 @@ impl Renderer {
                 .scissor_count(1);
             let raster = vk::PipelineRasterizationStateCreateInfo::default()
                 .polygon_mode(vk::PolygonMode::FILL)
-                .cull_mode(vk::CullModeFlags::BACK)
-                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+                // Cull mode and front face are dynamic (set per draw).
                 .line_width(1.0);
             let multisample = vk::PipelineMultisampleStateCreateInfo::default()
                 .rasterization_samples(vk::SampleCountFlags::TYPE_1);
@@ -347,7 +346,12 @@ impl Renderer {
                 .color_write_mask(vk::ColorComponentFlags::RGBA)];
             let blend =
                 vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
-            let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+            let dynamic_states = [
+                vk::DynamicState::VIEWPORT,
+                vk::DynamicState::SCISSOR,
+                vk::DynamicState::CULL_MODE,
+                vk::DynamicState::FRONT_FACE,
+            ];
             let dynamic =
                 vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
             let color_formats = [color];
@@ -468,6 +472,7 @@ impl Renderer {
                     set,
                     base_color: mat.base_color,
                     alpha_cutoff: mat.alpha_cutoff,
+                    double_sided: mat.double_sided,
                 });
             }
             Ok(())
@@ -665,6 +670,13 @@ impl Renderer {
                         &[mat.set],
                         &[],
                     );
+                    let cull = if mat.double_sided {
+                        vk::CullModeFlags::NONE
+                    } else {
+                        vk::CullModeFlags::BACK
+                    };
+                    device.cmd_set_cull_mode(cmd, cull);
+                    device.cmd_set_front_face(cmd, vk::FrontFace::COUNTER_CLOCKWISE);
                     let push = DrawPush {
                         model: (*world_matrix * prim.transform).to_cols_array(),
                         base_color: mat.base_color.into(),

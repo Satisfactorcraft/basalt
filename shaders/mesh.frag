@@ -32,6 +32,9 @@ void main() {
     }
 
     vec3 n = normalize(in_normal);
+    if (!gl_FrontFacing) {
+        n = -n; // back face of a double-sided material
+    }
     vec3 l = normalize(-frame.sun_dir.xyz);
     vec3 v = normalize(frame.camera_pos.xyz - in_world_pos);
     vec3 h = normalize(l + v);
