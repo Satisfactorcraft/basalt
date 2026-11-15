@@ -45,6 +45,8 @@ struct FrameData {
 struct DrawPush {
     model: [f32; 16],
     base_color: [f32; 4],
+    /// x = alpha cutoff (negative: opaque, alpha ignored)
+    material: [f32; 4],
 }
 
 struct Frame {
@@ -465,6 +467,7 @@ impl Renderer {
                 model.materials.push(GpuMaterial {
                     set,
                     base_color: mat.base_color,
+                    alpha_cutoff: mat.alpha_cutoff,
                 });
             }
             Ok(())
@@ -665,6 +668,7 @@ impl Renderer {
                     let push = DrawPush {
                         model: (*world_matrix * prim.transform).to_cols_array(),
                         base_color: mat.base_color.into(),
+                        material: [mat.alpha_cutoff, 0.0, 0.0, 0.0],
                     };
                     device.cmd_push_constants(
                         cmd,

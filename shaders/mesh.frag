@@ -13,6 +13,7 @@ layout(set = 1, binding = 0) uniform sampler2D base_color_tex;
 layout(push_constant) uniform DrawData {
     mat4 model;
     vec4 base_color;
+    vec4 material;     // x = alpha cutoff (< 0: opaque, alpha ignored)
 } draw;
 
 layout(location = 0) in vec3 in_world_pos;
@@ -23,8 +24,11 @@ layout(location = 0) out vec4 out_color;
 
 void main() {
     vec4 albedo = texture(base_color_tex, in_uv) * draw.base_color;
-    if (albedo.a < 0.5) {
-        discard; // alpha-tested cutout; real blending comes later
+    // glTF alphaMode: OPAQUE ignores alpha, MASK discards below the cutoff.
+    // BLEND isn't supported yet and is loaded as MASK.
+    float cutoff = draw.material.x;
+    if (cutoff >= 0.0 && albedo.a < cutoff) {
+        discard;
     }
 
     vec3 n = normalize(in_normal);

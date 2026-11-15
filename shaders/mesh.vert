@@ -13,6 +13,7 @@ layout(set = 0, binding = 0) uniform FrameData {
 layout(push_constant) uniform DrawData {
     mat4 model;
     vec4 base_color;
+    vec4 material;     // x = alpha cutoff (< 0: opaque, alpha ignored)
 } draw;
 
 layout(location = 0) in vec3 in_position;

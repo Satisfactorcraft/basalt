@@ -28,6 +28,9 @@ pub struct Primitive {
 
 pub struct CpuMaterial {
     pub base_color: Vec4,
+    /// Fragments with alpha below this are discarded. Negative = opaque
+    /// (alpha ignored), per glTF `alphaMode: OPAQUE`.
+    pub alpha_cutoff: f32,
     /// Index into `CpuModel::images`.
     pub image: Option<usize>,
 }
@@ -43,6 +46,7 @@ pub struct CpuModel {
 pub struct GpuMaterial {
     pub set: vk::DescriptorSet,
     pub base_color: Vec4,
+    pub alpha_cutoff: f32,
 }
 
 pub struct GpuModel {
@@ -100,14 +104,28 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
             }
             image_map[i]
         });
+        let alpha_cutoff = match mat.alpha_mode() {
+            gltf::material::AlphaMode::Opaque => -1.0,
+            gltf::material::AlphaMode::Mask => mat.alpha_cutoff().unwrap_or(0.5),
+            gltf::material::AlphaMode::Blend => {
+                warn!(
+                    "{}: material '{}' uses alphaMode BLEND, which isn't supported yet; rendering it alpha-tested at 0.5",
+                    path.display(),
+                    mat.name().unwrap_or("?")
+                );
+                0.5
+            }
+        };
         model.materials.push(CpuMaterial {
             base_color: Vec4::from(pbr.base_color_factor()),
+            alpha_cutoff,
             image,
         });
     }
     let default_material = model.materials.len();
     model.materials.push(CpuMaterial {
         base_color: Vec4::ONE,
+        alpha_cutoff: -1.0,
         image: None,
     });
 
