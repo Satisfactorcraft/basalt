@@ -697,4 +697,15 @@ mod tests {
         assert!(global::<Option<bool>>(&host, "A_UPDATED").is_none());
         assert!(global::<Option<bool>>(&host, "B_UPDATED").is_none());
     }
+
+    #[test]
+    fn eq_across_userdata_types() {
+        let (_g, host) = game("eq", &[("game.json", "{}")]);
+        let r: (bool, bool, bool, bool) = host
+            .lua
+            .load("local e = scene.spawn{} local v = vec3(1) return e == v, v == e, e == e, v == vec3(1)")
+            .eval()
+            .unwrap();
+        assert_eq!(r, (false, false, true, true));
+    }
 }
