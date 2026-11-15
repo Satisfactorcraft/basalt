@@ -78,6 +78,44 @@ pub struct ScriptHost {
     frame: u64,
 }
 
+/// `package.searchers` entry: resolves a module name inside `scripts/`.
+/// Returns the compiled chunk plus its path, or a "not found" message.
+fn search_module(lua: &Lua, name: String) -> LuaResult<MultiValue> {
+    let shared = types::shared(lua);
+    let base = name.replace('.', "/");
+    let mut tried = Vec::new();
+    for candidate in [
+        format!("scripts/{base}.lua"),
+        format!("scripts/{base}/init.lua"),
+    ] {
+        // normalize() rejects absolute paths and escaping the game folder;
+        // also refuse anything that resolves outside scripts/.
+        let Ok(path) = GameFs::normalize(&candidate) else {
+            continue;
+        };
+        if !path.starts_with("scripts/") {
+            continue;
+        }
+        if !shared.fs.exists(&path) {
+            tried.push(format!("\n\tno file '{path}'"));
+            continue;
+        }
+        let source = shared
+            .fs
+            .read_string(&path)
+            .map_err(|e| LuaError::runtime(format!("{e:#}")))?;
+        let chunk = lua
+            .load(&source)
+            .set_name(format!("@{path}"))
+            .into_function()?;
+        return (chunk, path).into_lua_multi(lua);
+    }
+    if tried.is_empty() {
+        tried.push(format!("\n\tinvalid module name '{name}'"));
+    }
+    tried.concat().into_lua_multi(lua)
+}
+
 impl ScriptHost {
     pub fn new(shared: Rc<Shared>) -> Result<Self> {
         // No io/debug; os gets trimmed to the harmless bits below.
@@ -107,13 +145,22 @@ impl ScriptHost {
             os.set(name, Value::Nil)?;
         }
 
-        // `require("foo.bar")` loads scripts/foo/bar.lua from the game folder.
-        let scripts = shared.fs.root().join("scripts");
-        let scripts = scripts.to_string_lossy();
+        // `require("foo.bar")` loads scripts/foo/bar.lua (or foo/bar/init.lua)
+        // through GameFs. The stock searchers read package.path/cpath, which
+        // scripts can rewrite to load files from anywhere, so they're replaced
+        // outright and package.path is irrelevant.
         let package: LuaTable = g.get("package")?;
-        package.set("path", format!("{scripts}/?.lua;{scripts}/?/init.lua"))?;
+        let searchers = lua.create_table()?;
+        searchers.raw_set(
+            1,
+            package.get::<LuaTable>("searchers")?.raw_get::<Value>(1)?,
+        )?; // preload
+        searchers.raw_set(2, lua.create_function(search_module)?)?;
+        package.set("searchers", searchers)?;
+        package.set("path", "")?;
         package.set("cpath", "")?;
         package.set("loadlib", Value::Nil)?;
+        package.set("searchpath", Value::Nil)?;
 
         api::install(&lua)?;
         lua.set_named_registry_value(INSTANCES_KEY, lua.create_table()?)?;
@@ -559,7 +606,15 @@ mod tests {
 
     #[test]
     fn sandbox() {
-        let (_g, host) = game("sandbox", &[("game.json", "{}")]);
+        let (_g, host) = game(
+            "sandbox",
+            &[
+                ("game.json", "{}"),
+                ("game.lua", "return 'not a script module'"),
+                ("scripts/ok.lua", "return 7"),
+                ("scripts/pkg/init.lua", "return 8"),
+            ],
+        );
         let lua = &host.lua;
         assert!(lua.load("return io").eval::<Value>().unwrap().is_nil());
         assert!(lua
@@ -572,6 +627,37 @@ mod tests {
             .load("return game.read_file('../../etc/passwd')")
             .eval::<Value>()
             .is_err());
+        // #2: rewriting package.path must not let require() leave scripts/.
+        let outside =
+            std::env::temp_dir().join(format!("basalt_escape_{}.lua", std::process::id()));
+        std::fs::write(&outside, "return 'ESCAPED'").unwrap();
+        let dir = outside
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let stem = outside.file_stem().unwrap().to_string_lossy().to_string();
+        let escape = lua
+            .load(format!(
+                "package.path = '{dir}/?.lua'; return require('{stem}')"
+            ))
+            .eval::<String>();
+        std::fs::remove_file(&outside).unwrap();
+        assert!(
+            escape.is_err(),
+            "require escaped the game folder: {escape:?}"
+        );
+        assert!(lua
+            .load("return package.searchpath")
+            .eval::<Value>()
+            .unwrap()
+            .is_nil());
+        assert!(lua
+            .load("return require('x/../../game')")
+            .eval::<Value>()
+            .is_err());
+        assert_eq!(lua.load("return require('ok')").eval::<i64>().unwrap(), 7);
+        assert_eq!(lua.load("return require('pkg')").eval::<i64>().unwrap(), 8);
         assert_eq!(
             lua.load("return game.read_file('game.json')")
                 .eval::<String>()
