@@ -670,15 +670,23 @@ impl Renderer {
                         &[mat.set],
                         &[],
                     );
+                    let model_matrix = *world_matrix * prim.transform;
                     let cull = if mat.double_sided {
                         vk::CullModeFlags::NONE
                     } else {
                         vk::CullModeFlags::BACK
                     };
+                    // A mirroring transform (negative determinant, e.g. a
+                    // negative scale) reverses triangle winding.
+                    let front = if model_matrix.determinant() < 0.0 {
+                        vk::FrontFace::CLOCKWISE
+                    } else {
+                        vk::FrontFace::COUNTER_CLOCKWISE
+                    };
                     device.cmd_set_cull_mode(cmd, cull);
-                    device.cmd_set_front_face(cmd, vk::FrontFace::COUNTER_CLOCKWISE);
+                    device.cmd_set_front_face(cmd, front);
                     let push = DrawPush {
-                        model: (*world_matrix * prim.transform).to_cols_array(),
+                        model: model_matrix.to_cols_array(),
                         base_color: mat.base_color.into(),
                         material: [mat.alpha_cutoff, 0.0, 0.0, 0.0],
                     };
