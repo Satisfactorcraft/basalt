@@ -28,9 +28,12 @@ NVIDIA/AMD/Intel driver on Windows or Linux). On Linux, X11 needs
 `libxkbcommon-x11` (installed on basically every desktop).
 
 **Shaders:** `build.rs` compiles `shaders/*.vert|frag` with `glslc` if it is on
-your PATH (it ships with the Vulkan SDK). Without it, the committed SPIR-V in
-`shaders/prebuilt/` is used. After editing shaders, run once with
-`BASALT_UPDATE_PREBUILT=1 cargo build` to refresh the prebuilt copies.
+your PATH (it ships with the Vulkan SDK). Without it, or if glslc fails while
+the GLSL is unchanged (e.g. an old SDK), the committed SPIR-V in
+`shaders/prebuilt/` is used. Each prebuilt file has a `.hash` of the GLSL it
+came from, so the build warns loudly if your shader edits can't be compiled.
+After editing shaders, run `BASALT_UPDATE_PREBUILT=1 cargo build` once to
+refresh the prebuilt copies.
 
 Debug builds enable the Vulkan validation layer if it is installed.
 Override with `BASALT_VALIDATION=1` / `0`. More logging: `RUST_LOG=debug`.
