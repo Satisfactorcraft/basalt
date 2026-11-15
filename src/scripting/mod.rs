@@ -243,30 +243,36 @@ impl ScriptHost {
 
         self.order.retain(|id| self.instances.contains_key(id));
         for id in self.order.clone() {
-            let alive = self
-                .shared
-                .world
-                .borrow()
-                .get(id)
-                .is_some_and(|e| !e.pending_destroy);
-            if !alive {
+            if !self.runnable(id) {
                 continue;
             }
             let Some(inst) = self.instances.get_mut(&id) else {
                 continue;
             };
-            if inst.failed {
-                continue;
-            }
             if !inst.started {
                 inst.started = true;
                 self.call(id, "on_start", ());
+                // on_start may have errored or destroyed its own entity.
+                if !self.runnable(id) {
+                    continue;
+                }
             }
             self.call(id, "on_update", dt);
         }
 
         self.attach_pending();
         self.flush_destroyed();
+    }
+
+    /// The entity is alive and its script instance isn't paused by an error.
+    fn runnable(&self, id: EntityId) -> bool {
+        let alive = self
+            .shared
+            .world
+            .borrow()
+            .get(id)
+            .is_some_and(|e| !e.pending_destroy);
+        alive && self.instances.get(&id).is_some_and(|i| !i.failed)
     }
 
     fn attach_pending(&mut self) {
@@ -664,5 +670,31 @@ mod tests {
                 .unwrap(),
             "{}"
         );
+    }
+
+    #[test]
+    fn no_update_after_failed_or_destroying_start() {
+        let (_g, mut host) = game(
+            "start-fail",
+            &[
+                (
+                    "levels/l.json",
+                    r#"{"entities":[{"script":"scripts/a.lua"},{"script":"scripts/b.lua"}]}"#,
+                ),
+                (
+                    "scripts/a.lua",
+                    "local A = {} function A:on_start() error('x') end function A:on_update() A_UPDATED = true end return A",
+                ),
+                (
+                    "scripts/b.lua",
+                    "local B = {} function B:on_start() self.entity:destroy() end function B:on_update() B_UPDATED = true end return B",
+                ),
+            ],
+        );
+        host.load_level("levels/l.json").unwrap();
+        host.update(0.016);
+        host.update(0.016);
+        assert!(global::<Option<bool>>(&host, "A_UPDATED").is_none());
+        assert!(global::<Option<bool>>(&host, "B_UPDATED").is_none());
     }
 }
