@@ -247,6 +247,15 @@ impl Renderer {
         self.needs_resize = true;
     }
 
+    fn surface_extent_is_zero(&self) -> Result<bool> {
+        let caps = unsafe {
+            self.ctx
+                .surface_loader
+                .get_physical_device_surface_capabilities(self.ctx.physical, self.ctx.surface)?
+        };
+        Ok(caps.current_extent.width == 0 || caps.current_extent.height == 0)
+    }
+
     fn recreate_swapchain(&mut self) -> Result<()> {
         self.ctx.wait_idle();
         let old = match self.swapchain.take() {
@@ -491,6 +500,11 @@ impl Renderer {
             return Ok(()); // minimized
         }
         if self.needs_resize || self.swapchain.is_none() {
+            // The surface can report 0x0 (minimized) before we get the
+            // Resized event; creating a swapchain then is invalid.
+            if self.surface_extent_is_zero()? {
+                return Ok(());
+            }
             self.recreate_swapchain()?;
         }
 

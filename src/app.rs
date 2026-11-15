@@ -3,7 +3,7 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use log::{error, info, warn};
@@ -55,6 +55,7 @@ pub fn run(fs: GameFs, config: GameConfig) -> Result<()> {
         last_frame: Instant::now(),
         fps_timer: Instant::now(),
         fps_frames: 0,
+        next_background_tick: Instant::now(),
         fatal: None,
     };
     event_loop.run_app(&mut app)?;
@@ -76,8 +77,13 @@ struct App {
     last_frame: Instant,
     fps_timer: Instant,
     fps_frames: u32,
+    /// While minimized: when the next throttled (render-less) tick is due.
+    next_background_tick: Instant,
     fatal: Option<anyhow::Error>,
 }
+
+/// Script update rate while the window is minimized.
+const BACKGROUND_TICK: Duration = Duration::from_millis(33);
 
 impl App {
     fn init(&mut self, el: &ActiveEventLoop) -> Result<()> {
@@ -121,7 +127,8 @@ impl App {
         self.scripts.update(dt);
         self.handle_requests(el);
 
-        if let Some(r) = self.renderer.as_mut() {
+        let minimized = self.minimized();
+        if let Some(r) = self.renderer.as_mut().filter(|_| !minimized) {
             if let Err(e) = r.render(&self.shared.world.borrow()) {
                 error!("render failed: {e:#}");
                 self.fatal = Some(e);
@@ -137,6 +144,15 @@ impl App {
             self.fps_timer = Instant::now();
             self.fps_frames = 0;
         }
+    }
+
+    /// Minimized windows can't be presented to; on Windows they're also
+    /// resized to 0x0. Either way, don't render and don't spin.
+    fn minimized(&self) -> bool {
+        self.window.as_ref().is_some_and(|w| {
+            let size = w.inner_size();
+            w.is_minimized() == Some(true) || size.width == 0 || size.height == 0
+        })
     }
 
     fn reload_level(&mut self) {
@@ -311,9 +327,25 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if self.window.is_none() {
+            return;
+        }
+        if self.minimized() {
+            // No vsync to pace us and some platforms stop sending
+            // RedrawRequested, so tick scripts here at a low rate and sleep
+            // in between.
+            let now = Instant::now();
+            if now >= self.next_background_tick {
+                self.frame(el);
+                self.next_background_tick = now + BACKGROUND_TICK;
+            }
+            el.set_control_flow(ControlFlow::WaitUntil(self.next_background_tick));
+        } else {
+            el.set_control_flow(ControlFlow::Poll);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 
