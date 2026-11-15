@@ -125,7 +125,7 @@ Instance fields: `self.entity`, `self.params`, `self.name`.
 | **vec3** | `vec3(x, y, z)`, `vec3(s)`; fields `x y z`; `+ - * /` with vec3 or numbers; `:length() :normalized() :dot(v) :cross(v) :distance(v) :lerp(v, t) :copy() :unpack()` |
 | **entity** | fields `name position rotation scale model visible` (read/write), `id`, `script_path`; methods `:valid() :destroy() :translate(v) :translate_local(v) :rotate(axis, deg) :rotate_local(axis, deg) :rotate_x/y/z(deg) :look_at(target, up?) :forward() :right() :up() :script()` |
 | **scene** | `find(name) all() camera() spawn{...} load_level(path) reload_level() level() set_clear_color(r,g,b,a?) set_sun(dir, color?) set_ambient(color)` |
-| **input** | `key_down/pressed/released(name) mouse_down/pressed/released("left"\|"right"\|"middle") mouse_position() mouse_delta() scroll() lock_cursor(bool) cursor_locked()` |
+| **input** | `key_down/pressed/released(name) mouse_down/pressed/released("left"\|"right"\|"middle") mouse_position() mouse_delta() scroll() lock_cursor(bool) cursor_locked()`. The lock applies at the end of the frame; `cursor_locked()` reports whether it actually took effect. |
 | **time** | `time.dt time.elapsed time.frame` |
 | **game** | `quit() read_file(path) file_exists(path) list_dir(path) window_size() set_title(s)` |
 | **json** | `decode(text) encode(value, pretty?)` |

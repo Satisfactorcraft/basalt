@@ -206,9 +206,9 @@ pub fn install(lua: &Lua) -> LuaResult<()> {
     input.set(
         "lock_cursor",
         lua.create_function(|lua, locked: bool| {
-            let s = shared(lua);
-            s.cursor_locked.set(locked);
-            s.requests.borrow_mut().cursor_lock = Some(locked);
+            // Applied by the app after the update; cursor_locked() reports
+            // the real outcome from then on.
+            shared(lua).requests.borrow_mut().cursor_lock = Some(locked);
             Ok(())
         })?,
     )?;

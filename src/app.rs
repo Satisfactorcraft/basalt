@@ -220,10 +220,15 @@ impl App {
                 } else {
                     window.set_cursor_grab(CursorGrabMode::None)
                 };
-                if let Err(e) = result {
-                    warn!("cursor lock failed: {e}");
-                }
-                window.set_cursor_visible(!lock);
+                let locked = match result {
+                    Ok(()) => lock,
+                    Err(e) => {
+                        warn!("cursor lock failed: {e}");
+                        false
+                    }
+                };
+                window.set_cursor_visible(!locked);
+                self.shared.cursor_locked.set(locked);
             }
         }
         if req.quit {
