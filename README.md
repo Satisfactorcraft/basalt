@@ -9,7 +9,8 @@ basalt path/to/mygame   # runs any game folder
 
 Everything a game needs (config, levels, models, textures, Lua scripts, data)
 lives in one folder. Ship a game by putting `basalt(.exe)` next to a `game/`
-folder. Edit any file while the game runs and it hot reloads.
+folder. Edit scripts, levels, models and textures while the game runs and
+they hot reload; scripts can react to any other file through `on_file_changed`.
 
 ![demo](docs/demo.png)
 
@@ -114,12 +115,17 @@ function Spinner:on_update(dt)    -- every frame
 end
 
 function Spinner:on_destroy() end -- entity destroyed or level unloaded
+                                  -- (only if on_start ran)
 function Spinner:on_reload() end  -- after hot reload; self state is kept
+function Spinner:on_file_changed(path) end -- any file in the game folder
+                                  -- was saved (game-relative path)
 
 return Spinner
 ```
 
 Instance fields: `self.entity`, `self.params`, `self.name`.
+
+If `on_start` errors or destroys its own entity, `on_update` doesn't run.
 
 ### Lua API
 
@@ -142,7 +148,12 @@ delete insert home end pageup pagedown left right up down`, `shift ctrl alt`
 
 Positions/rotations are returned as copies: `local p = e.position; p.y = 2;
 e.position = p`. `scene.spawn` takes the same fields as a level entity
-(`position` can be a `vec3` or `{x, y, z}`).
+(`position` can be a `vec3` or `{x, y, z}`). Its `params` can be any Lua
+value (vec3s, entity handles, functions), and the script instance exists right
+away, so `scene.spawn{...}:script()` works immediately. `on_start` runs on
+the next update.
+
+`require` only loads modules from `scripts/`, whatever `package.path` says.
 
 `io`, `debug`, `dofile`, `loadfile`, native modules and the dangerous `os`
 functions are removed. This is a guard rail, not a security boundary: only run
@@ -156,6 +167,9 @@ game folders you trust.
 | the current level `.json` | level reloads. Broken JSON: the current level stays. |
 | a model / texture | GPU caches flush and models reload |
 | `game.json` | needs a restart (logged) |
+| anything else (`data/*.json`, ...) | nothing automatic; every script's `on_file_changed(path)` is called so it can re-read what it needs (the demo's `main.lua` does this for `data/demo.json`) |
+
+`on_file_changed` also fires for the cases above, after their reload.
 
 ### Hotkeys
 
@@ -187,7 +201,8 @@ shaders/              GLSL (+ prebuilt SPIR-V)
 
 ## Not in v1 (yet)
 
-PBR materials (only base color + texture), normal maps, shadows, transparency
-(alpha is a cutout), skinned/animated meshes, audio, gamepads, physics, UI/text,
+PBR materials (only base color + texture), normal maps, shadows, alpha blending
+(`BLEND` materials render alpha-tested; `OPAQUE`, `MASK` and `doubleSided`
+are supported), skinned/animated meshes, audio, gamepads, physics, UI/text,
 packaging the game folder into an archive. Models stream in on the main thread
 the first time they're drawn, so big models hitch once.

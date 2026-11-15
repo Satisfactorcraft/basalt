@@ -10,6 +10,7 @@
 //! function Spinner:on_update(dt) self.entity:rotate_y(90 * dt) end
 //! function Spinner:on_destroy() end
 //! function Spinner:on_reload() end   -- called after hot reload
+//! function Spinner:on_file_changed(path) end  -- any game file saved
 //! return Spinner
 //! ```
 //!
@@ -462,6 +463,20 @@ impl ScriptHost {
 
     // -- classes --------------------------------------------------------------
 
+    /// Calls `on_file_changed(path)` on every running script instance, once
+    /// per changed game-relative path.
+    pub fn notify_file_changed(&mut self, paths: &[String]) {
+        for id in self.order.clone() {
+            for path in paths {
+                let started = self.instances.get(&id).is_some_and(|i| i.started);
+                if !started || !self.runnable(id) {
+                    break;
+                }
+                self.call(id, "on_file_changed", path.clone());
+            }
+        }
+    }
+
     /// Recompiles every script in use and swaps it under live instances.
     pub fn reload_scripts(&mut self) {
         self.reported.clear();
@@ -783,5 +798,29 @@ mod tests {
             .load("return scene.find('entity_2'):script().configured")
             .eval::<bool>()
             .unwrap());
+    }
+
+    #[test]
+    fn on_file_changed_hook() {
+        let (_g, mut host) = game(
+            "filechanged",
+            &[
+                ("levels/l.json", r#"{"entities":[{"script":"scripts/w.lua"}]}"#),
+                (
+                    "scripts/w.lua",
+                    "local W = {} function W:on_file_changed(p) SEEN = (SEEN or '') .. p .. ';' end return W",
+                ),
+            ],
+        );
+        host.load_level("levels/l.json").unwrap();
+        // Not started yet: no notification.
+        host.notify_file_changed(&["data/a.json".into()]);
+        assert!(global::<Option<String>>(&host, "SEEN").is_none());
+        host.update(0.016);
+        host.notify_file_changed(&["data/a.json".into(), "textures/b.png".into()]);
+        assert_eq!(
+            global::<String>(&host, "SEEN"),
+            "data/a.json;textures/b.png;"
+        );
     }
 }

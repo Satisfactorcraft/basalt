@@ -61,7 +61,10 @@ fn main() {
                 );
             }
             std::fs::copy(&prebuilt, &dst).unwrap_or_else(|e| {
-                panic!("{reason}, and no prebuilt shader {}: {e}", prebuilt.display())
+                panic!(
+                    "{reason}, and no prebuilt shader {}: {e}",
+                    prebuilt.display()
+                )
             });
         };
 

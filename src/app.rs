@@ -198,6 +198,8 @@ impl App {
         if level {
             self.reload_level();
         }
+        // Let scripts react to anything else, e.g. re-read data/*.json.
+        self.scripts.notify_file_changed(&changed);
     }
 
     fn handle_requests(&mut self, el: &ActiveEventLoop) {
