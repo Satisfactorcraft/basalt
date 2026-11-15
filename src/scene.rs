@@ -85,10 +85,10 @@ impl Camera {
                 self.fov
             );
         }
-        if !(self.near > 0.0) {
+        if self.near.is_nan() || self.near <= 0.0 {
             bail!("camera near must be greater than 0, got {}", self.near);
         }
-        if !(self.far > self.near) {
+        if self.far.is_nan() || self.far <= self.near {
             bail!(
                 "camera far ({}) must be greater than near ({})",
                 self.far,
