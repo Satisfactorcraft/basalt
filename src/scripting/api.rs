@@ -319,11 +319,13 @@ fn spawn(lua: &Lua, def: LuaTable) -> LuaResult<LuaEntity> {
         .map_err(rt)?;
     if let Some(cam) = def.get::<Option<LuaTable>>("camera")? {
         let d = Camera::default();
-        e.camera = Some(Camera {
+        let camera = Camera {
             fov: cam.get::<Option<f32>>("fov")?.unwrap_or(d.fov),
             near: cam.get::<Option<f32>>("near")?.unwrap_or(d.near),
             far: cam.get::<Option<f32>>("far")?.unwrap_or(d.far),
-        });
+        };
+        camera.validate().map_err(rt)?;
+        e.camera = Some(camera);
     }
     // Params stay a Lua value (no JSON round trip), so they can hold
     // vec3s, entity handles, functions, etc.

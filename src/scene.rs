@@ -1,6 +1,6 @@
 //! Entities, transforms and level files.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use serde::Deserialize;
 
@@ -73,6 +73,30 @@ pub struct Camera {
     pub fov: f32,
     pub near: f32,
     pub far: f32,
+}
+
+impl Camera {
+    /// Bad values silently wreck the projection (near = 0 collapses depth),
+    /// so reject them up front.
+    pub fn validate(&self) -> Result<()> {
+        if !(self.fov > 0.0 && self.fov < 180.0) {
+            bail!(
+                "camera fov must be between 0 and 180 degrees, got {}",
+                self.fov
+            );
+        }
+        if !(self.near > 0.0) {
+            bail!("camera near must be greater than 0, got {}", self.near);
+        }
+        if !(self.far > self.near) {
+            bail!(
+                "camera far ({}) must be greater than near ({})",
+                self.far,
+                self.near
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Default for Camera {
@@ -326,6 +350,11 @@ impl Default for EntityDef {
 
 impl EntityDef {
     pub fn into_entity(self) -> Result<Entity> {
+        if let Some(cam) = &self.camera {
+            cam.validate().with_context(|| {
+                format!("entity '{}'", self.name.as_deref().unwrap_or("<unnamed>"))
+            })?;
+        }
         Ok(Entity {
             name: self.name.unwrap_or_default(),
             transform: Transform {
@@ -347,5 +376,45 @@ impl LevelDef {
     pub fn load(fs: &GameFs, path: &str) -> Result<Self> {
         let text = fs.read_string(path)?;
         serde_json::from_str(&text).with_context(|| format!("invalid level '{path}'"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Camera;
+
+    #[test]
+    fn camera_validation() {
+        assert!(Camera::default().validate().is_ok());
+        let bad = [
+            Camera {
+                near: 0.0,
+                ..Default::default()
+            },
+            Camera {
+                near: -1.0,
+                ..Default::default()
+            },
+            Camera {
+                near: 10.0,
+                far: 5.0,
+                ..Default::default()
+            },
+            Camera {
+                fov: 0.0,
+                ..Default::default()
+            },
+            Camera {
+                fov: 180.0,
+                ..Default::default()
+            },
+            Camera {
+                near: f32::NAN,
+                ..Default::default()
+            },
+        ];
+        for cam in bad {
+            assert!(cam.validate().is_err(), "{cam:?} should be rejected");
+        }
     }
 }
