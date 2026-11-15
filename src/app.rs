@@ -1,7 +1,6 @@
 //! Window, event loop and the per-frame order of things:
 //! input -> hot reload -> scripts -> engine requests -> render.
 
-use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,24 +16,18 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::config::{GameConfig, CONFIG_FILE};
 use crate::hot_reload::Watcher;
-use crate::input::Input;
 use crate::renderer::Renderer;
-use crate::scene::World;
-use crate::scripting::{Requests, ScriptHost, Shared};
+use crate::scripting::{ScriptHost, Shared};
 use crate::vfs::GameFs;
 
 pub fn run(fs: GameFs, config: GameConfig) -> Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let shared = Rc::new(Shared {
-        fs: fs.clone(),
-        world: RefCell::new(World::default()),
-        input: RefCell::new(Input::default()),
-        requests: RefCell::new(Requests::default()),
-        window_size: Cell::new((config.window.width, config.window.height)),
-        cursor_locked: Cell::new(false),
-    });
+    let shared = Rc::new(Shared::new(
+        fs.clone(),
+        (config.window.width, config.window.height),
+    ));
     let scripts = ScriptHost::new(shared.clone())?;
     let watcher = if config.hot_reload {
         match Watcher::new(&fs) {
@@ -193,8 +186,6 @@ impl App {
 
     fn handle_requests(&mut self, el: &ActiveEventLoop) {
         let req = std::mem::take(&mut *self.shared.requests.borrow_mut());
-        // new_scripts is consumed by the script host itself.
-        self.shared.requests.borrow_mut().new_scripts = req.new_scripts;
 
         if let Some(level) = req.load_level {
             if let Err(e) = self.scripts.load_level(&level) {

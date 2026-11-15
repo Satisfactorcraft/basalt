@@ -325,16 +325,22 @@ fn spawn(lua: &Lua, def: LuaTable) -> LuaResult<LuaEntity> {
             far: cam.get::<Option<f32>>("far")?.unwrap_or(d.far),
         });
     }
-    match def.get::<Value>("params")? {
-        Value::Nil => {}
-        v => e.params = lua.from_value(v)?,
-    }
+    // Params stay a Lua value (no JSON round trip), so they can hold
+    // vec3s, entity handles, functions, etc.
+    let params: Value = def.get("params")?;
 
-    let has_script = e.script.is_some();
+    let script = e.script.clone();
     let s = shared(lua);
     let id = s.world.borrow_mut().spawn(e);
-    if has_script {
-        s.requests.borrow_mut().new_scripts.push(id);
+    if let Some(script) = script {
+        let name = s
+            .world
+            .borrow()
+            .get(id)
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        let inst = super::new_instance(lua, &s, id, script, name, params)?;
+        s.pending.borrow_mut().push((id, inst));
     }
     Ok(LuaEntity(id))
 }

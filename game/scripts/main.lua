@@ -35,7 +35,7 @@ function Game:throw_crate()
     position = cam.position + f,
     scale = 0.4,
     script = "scripts/projectile.lua",
-    params = { velocity = { v.x, v.y, v.z } },
+    params = { velocity = v },
   }
 end
 
