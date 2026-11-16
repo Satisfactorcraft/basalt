@@ -157,6 +157,9 @@ def main():
         for k in range(4):
             a, b = ring[k], ring[(k + 1) % 4]
             tri = [a, b, tip] if tip[1] > 0 else [b, a, tip]
+            # Scale first: a non-uniform scale changes face orientation, so
+            # the normal must come from the final triangle.
+            tri = [(p[0] * 0.5, p[1] * 0.8, p[2] * 0.5) for p in tri]
             e1 = tuple(tri[1][i] - tri[0][i] for i in range(3))
             e2 = tuple(tri[2][i] - tri[0][i] for i in range(3))
             n = cross(e1, e2)
@@ -164,7 +167,7 @@ def main():
             n = tuple(c / ln for c in n)
             for p in tri:
                 I.append(len(P))
-                P.append((p[0] * 0.5, p[1] * 0.8, p[2] * 0.5))
+                P.append(p)
                 N.append(n)
                 T.append((0.0, 0.0))
     write_gltf("gem", P, N, T, I, {
