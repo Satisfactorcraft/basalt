@@ -22,11 +22,12 @@ mod types;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use log::{error, info, warn};
 use mlua::prelude::*;
-use mlua::{LuaOptions, LuaSerdeExt, MultiValue, StdLib, Value};
+use mlua::{HookTriggers, LuaOptions, LuaSerdeExt, MultiValue, StdLib, Value, VmState};
 
 use crate::input::Input;
 use crate::scene::{EntityId, LevelDef, World};
@@ -52,6 +53,10 @@ pub struct Shared {
     pub requests: RefCell<Requests>,
     pub window_size: Cell<(u32, u32)>,
     pub cursor_locked: Cell<bool>,
+    /// Watchdog: max time per script call (None = unlimited), and the
+    /// deadline of the call currently running.
+    pub script_timeout: Cell<Option<Duration>>,
+    deadline: Cell<Option<Instant>>,
     /// Compiled script classes by path; `None` = failed to compile.
     /// Lives here (not in ScriptHost) so `scene.spawn` can build instances.
     classes: RefCell<HashMap<String, Option<LuaTable>>>,
@@ -69,6 +74,8 @@ impl Shared {
             requests: RefCell::new(Requests::default()),
             window_size: Cell::new(window_size),
             cursor_locked: Cell::new(false),
+            script_timeout: Cell::new(Some(Duration::from_secs(1))),
+            deadline: Cell::new(None),
             classes: RefCell::new(HashMap::new()),
             pending: RefCell::new(Vec::new()),
         }
@@ -119,9 +126,25 @@ fn load_class(lua: &Lua, shared: &Shared, path: &str) -> Option<LuaTable> {
     class
 }
 
+/// Runs `f` under the script watchdog. Nested calls keep the outermost
+/// deadline, so a hook can't extend its budget by spawning scripted entities.
+fn guarded<R>(shared: &Shared, f: impl FnOnce() -> R) -> R {
+    let outer = shared.deadline.get();
+    if outer.is_none() {
+        if let Some(t) = shared.script_timeout.get() {
+            shared.deadline.set(Some(Instant::now() + t));
+        }
+    }
+    let r = f();
+    shared.deadline.set(outer);
+    r
+}
+
 fn compile_class(lua: &Lua, shared: &Shared, path: &str) -> Result<LuaTable> {
     let source = shared.fs.read_string(path)?;
-    let value: Value = lua.load(&source).set_name(format!("@{path}")).eval()?;
+    let value: Value = guarded(shared, || {
+        lua.load(&source).set_name(format!("@{path}")).eval()
+    })?;
     match value {
         Value::Table(t) => Ok(t),
         other => bail!(
@@ -273,6 +296,55 @@ impl ScriptHost {
 
         api::install(&lua)?;
         lua.set_named_registry_value(INSTANCES_KEY, lua.create_table()?)?;
+
+        // Infinite-loop watchdog. Lua copies the hook into coroutines
+        // created after this, so loops inside coroutines are caught too.
+        let watchdog = shared.clone();
+        lua.set_global_hook(
+            HookTriggers::new().every_nth_instruction(10_000),
+            move |_, _| match watchdog.deadline.get() {
+                Some(deadline) if Instant::now() > deadline => {
+                    let ms = watchdog
+                        .script_timeout
+                        .get()
+                        .unwrap_or_default()
+                        .as_millis();
+                    Err(LuaError::runtime(format!(
+                        "script ran for more than {ms} ms and was stopped (infinite loop?)"
+                    )))
+                }
+                _ => Ok(VmState::Continue),
+            },
+        )?;
+        // The watchdog's error usually fires inside the runaway code, so a
+        // script that loops around pcall() would swallow it forever. Once
+        // the deadline has passed, pcall/xpcall/coroutine.resume re-raise
+        // instead of returning false. Written in Lua so yielding through
+        // pcall inside coroutines keeps working.
+        let deadline = shared.clone();
+        let timed_out = lua.create_function(move |_, ()| {
+            Ok(deadline.deadline.get().is_some_and(|d| Instant::now() > d))
+        })?;
+        lua.load(
+            r#"
+            local timed_out, raw_pcall, raw_xpcall, raw_resume = ...
+            local function check(ok, ...)
+              if not ok and timed_out() then error((...), 0) end
+              return ok, ...
+            end
+            pcall = function(...) return check(raw_pcall(...)) end
+            xpcall = function(...) return check(raw_xpcall(...)) end
+            coroutine.resume = function(...) return check(raw_resume(...)) end
+            "#,
+        )
+        .set_name("=basalt watchdog")
+        .call::<()>((
+            timed_out,
+            g.get::<LuaFunction>("pcall")?,
+            g.get::<LuaFunction>("xpcall")?,
+            g.get::<LuaTable>("coroutine")?
+                .get::<LuaFunction>("resume")?,
+        ))?;
 
         let loaded: LuaTable = package.get("loaded")?;
         let builtin_modules = loaded
@@ -466,7 +538,7 @@ impl ScriptHost {
             };
             let mut argv: MultiValue = args.into_lua_multi(&self.lua)?;
             argv.push_front(Value::Table(inst.table.clone()));
-            func.call::<()>(argv)
+            guarded(&self.shared, || func.call::<()>(argv))
         })();
         if let Err(e) = result {
             inst.failed = true;
@@ -924,5 +996,87 @@ mod tests {
             ticks_while_paused + 1,
             "should run again"
         );
+    }
+
+    #[test]
+    fn watchdog_stops_runaway_scripts() {
+        let (_g, mut host) = game(
+            "watchdog",
+            &[
+                (
+                    "levels/l.json",
+                    r#"{"entities":[{"script":"scripts/loop.lua"},{"script":"scripts/co.lua"},{"script":"scripts/ok.lua"}]}"#,
+                ),
+                ("scripts/loop.lua", "local L = {} function L:on_update() while true do pcall(function() while true do end end) end end return L"),
+                ("scripts/co.lua", "local C = {} function C:on_update() coroutine.wrap(function() while true do end end)() end return C"),
+                ("scripts/ok.lua", "local O = {} function O:on_update() OK = (OK or 0) + 1 end return O"),
+            ],
+        );
+        host.shared
+            .script_timeout
+            .set(Some(Duration::from_millis(100)));
+        host.load_level("levels/l.json").unwrap();
+        let start = Instant::now();
+        host.update(0.016);
+        host.update(0.016);
+        // Both runaway scripts are stopped once each, then paused.
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            global::<i64>(&host, "OK"),
+            2,
+            "healthy scripts keep running"
+        );
+        assert!(host.instances.values().filter(|i| i.failed).count() == 2);
+        assert!(host.shared.deadline.get().is_none());
+    }
+
+    #[test]
+    fn pcall_and_coroutines_still_work_normally() {
+        let (_g, host) = game("pcall-ok", &[("game.json", "{}")]);
+        let r: (bool, String, i64) = host
+            .lua
+            .load(
+                r#"
+                local ok, err = pcall(error, "boom", 0)
+                local co = coroutine.wrap(function()
+                  local a = 0
+                  for i = 1, 3 do
+                    -- yield through pcall inside a coroutine
+                    pcall(function() a = a + coroutine.yield(i) end)
+                  end
+                  return a
+                end)
+                co(); co(10); co(20)
+                return ok, err, co(30)
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(r, (false, "boom".to_string(), 60));
+    }
+
+    #[test]
+    fn watchdog_covers_script_top_level() {
+        let (_g, mut host) = game(
+            "watchdog-top",
+            &[
+                (
+                    "levels/l.json",
+                    r#"{"entities":[{"script":"scripts/top.lua"}]}"#,
+                ),
+                ("scripts/top.lua", "while true do end return {}"),
+            ],
+        );
+        host.shared
+            .script_timeout
+            .set(Some(Duration::from_millis(100)));
+        let start = Instant::now();
+        host.load_level("levels/l.json").unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(host.instances.values().all(|i| i.failed));
     }
 }

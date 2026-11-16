@@ -62,7 +62,8 @@ the game folder and can't escape it (`../` out of the folder is an error).
   "start_level": "levels/main.json",
   "window": { "width": 1280, "height": 720, "vsync": true, "resizable": true, "fullscreen": false },
   "hot_reload": true,
-  "dev_mode": false
+  "dev_mode": false,
+  "script_timeout_ms": 1000
 }
 ```
 
@@ -127,6 +128,11 @@ return Spinner
 Instance fields: `self.entity`, `self.params`, `self.name`.
 
 If `on_start` errors or destroys its own entity, `on_update` doesn't run.
+
+A single script call (a hook, or a script file's top-level code) that runs
+longer than `script_timeout_ms` (default 1000; `0` = no limit) is stopped with
+an error and that script pauses, so an accidental infinite loop can't freeze
+the game or block hot reload.
 
 ### Lua API
 

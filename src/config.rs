@@ -18,6 +18,9 @@ pub struct GameConfig {
     /// Enables developer hotkeys (F5 = reload level). Off by default so a
     /// shipped game can't be reset by a stray key press.
     pub dev_mode: bool,
+    /// Longest a single script call (a hook, or a script file's top level)
+    /// may run before it's stopped as a likely infinite loop. 0 = no limit.
+    pub script_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,6 +41,7 @@ impl Default for GameConfig {
             window: WindowConfig::default(),
             hot_reload: true,
             dev_mode: false,
+            script_timeout_ms: 1000,
         }
     }
 }

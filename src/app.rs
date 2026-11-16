@@ -28,6 +28,9 @@ pub fn run(fs: GameFs, config: GameConfig) -> Result<()> {
         fs.clone(),
         (config.window.width, config.window.height),
     ));
+    shared.script_timeout.set(
+        (config.script_timeout_ms > 0).then(|| Duration::from_millis(config.script_timeout_ms)),
+    );
     let scripts = ScriptHost::new(shared.clone())?;
     let watcher = if config.hot_reload {
         match Watcher::new(&fs) {
