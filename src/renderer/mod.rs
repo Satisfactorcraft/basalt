@@ -20,7 +20,7 @@ use winit::window::Window;
 use crate::scene::{Camera, Transform, World};
 use crate::vfs::GameFs;
 use context::GpuContext;
-use model::{GpuMaterial, GpuModel, Vertex};
+use model::{GpuMaterial, GpuModel, SamplerKey, Vertex};
 use resources::{image_barrier, Buffer, Image2d, Texture};
 use swapchain::Swapchain;
 
@@ -75,7 +75,8 @@ pub struct Renderer {
     pipeline_formats: (vk::Format, vk::Format),
     descriptor_pool: vk::DescriptorPool,
     command_pool: vk::CommandPool,
-    sampler: vk::Sampler,
+    /// One sampler per distinct glTF sampler setting.
+    samplers: HashMap<SamplerKey, vk::Sampler>,
     white: Option<Texture>,
     frames: Vec<Frame>,
     frame_index: usize,
@@ -148,19 +149,6 @@ impl Renderer {
                 None,
             )?;
 
-            let mut sampler_info = vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::LINEAR)
-                .min_filter(vk::Filter::LINEAR)
-                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                .address_mode_v(vk::SamplerAddressMode::REPEAT)
-                .address_mode_w(vk::SamplerAddressMode::REPEAT)
-                .max_lod(vk::LOD_CLAMP_NONE);
-            if let Some(a) = ctx.max_anisotropy {
-                sampler_info = sampler_info.anisotropy_enable(true).max_anisotropy(a);
-            }
-            let sampler = device.create_sampler(&sampler_info, None)?;
-
             let white = ctx.upload_texture(
                 &Image2d {
                     width: 1,
@@ -230,7 +218,7 @@ impl Renderer {
                 pipeline_formats: (vk::Format::UNDEFINED, vk::Format::UNDEFINED),
                 descriptor_pool,
                 command_pool,
-                sampler,
+                samplers: HashMap::new(),
                 white: Some(white),
                 frames,
                 frame_index: 0,
@@ -389,6 +377,32 @@ impl Renderer {
         Ok(())
     }
 
+    fn sampler(&mut self, key: SamplerKey) -> Result<vk::Sampler> {
+        if let Some(s) = self.samplers.get(&key) {
+            return Ok(*s);
+        }
+        let mut info = vk::SamplerCreateInfo::default()
+            .mag_filter(key.mag)
+            .min_filter(key.min)
+            .mipmap_mode(key.mipmap)
+            .address_mode_u(key.wrap_u)
+            .address_mode_v(key.wrap_v)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            // Non-mipmapped min filters sample the base level only.
+            .max_lod(if key.use_mips {
+                vk::LOD_CLAMP_NONE
+            } else {
+                0.0
+            });
+        let linear = key.min == vk::Filter::LINEAR && key.mag == vk::Filter::LINEAR;
+        if let Some(a) = self.ctx.max_anisotropy.filter(|_| linear) {
+            info = info.anisotropy_enable(true).max_anisotropy(a);
+        }
+        let sampler = unsafe { self.ctx.device.create_sampler(&info, None)? };
+        self.samplers.insert(key, sampler);
+        Ok(sampler)
+    }
+
     // -- models -----------------------------------------------------------------
 
     /// Drops every cached model; they reload from disk on next use.
@@ -462,8 +476,9 @@ impl Renderer {
                             .set_layouts(&layouts),
                     )?[0]
                 };
+                let sampler = self.sampler(mat.sampler)?;
                 let image_info = [vk::DescriptorImageInfo {
-                    sampler: self.sampler,
+                    sampler,
                     image_view: view,
                     image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 }];
@@ -807,7 +822,9 @@ impl Drop for Renderer {
             d.destroy_descriptor_set_layout(self.material_layout, None);
             d.destroy_descriptor_pool(self.descriptor_pool, None);
             d.destroy_command_pool(self.command_pool, None);
-            d.destroy_sampler(self.sampler, None);
+            for (_, s) in self.samplers.drain() {
+                d.destroy_sampler(s, None);
+            }
         }
     }
 }

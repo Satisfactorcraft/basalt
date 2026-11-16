@@ -26,6 +26,72 @@ pub struct Primitive {
     pub transform: Mat4,
 }
 
+/// glTF sampler settings, as Vulkan values. Used as a cache key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SamplerKey {
+    pub wrap_u: vk::SamplerAddressMode,
+    pub wrap_v: vk::SamplerAddressMode,
+    pub mag: vk::Filter,
+    pub min: vk::Filter,
+    pub mipmap: vk::SamplerMipmapMode,
+    /// false for min filters without mipmapping (NEAREST / LINEAR).
+    pub use_mips: bool,
+}
+
+impl Default for SamplerKey {
+    fn default() -> Self {
+        Self {
+            wrap_u: vk::SamplerAddressMode::REPEAT,
+            wrap_v: vk::SamplerAddressMode::REPEAT,
+            mag: vk::Filter::LINEAR,
+            min: vk::Filter::LINEAR,
+            mipmap: vk::SamplerMipmapMode::LINEAR,
+            use_mips: true,
+        }
+    }
+}
+
+impl SamplerKey {
+    fn from_gltf(s: &gltf::texture::Sampler) -> Self {
+        use gltf::texture::{MagFilter, MinFilter, WrappingMode};
+        let wrap = |w| match w {
+            WrappingMode::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            WrappingMode::MirroredRepeat => vk::SamplerAddressMode::MIRRORED_REPEAT,
+            WrappingMode::Repeat => vk::SamplerAddressMode::REPEAT,
+        };
+        let mag = match s.mag_filter() {
+            Some(MagFilter::Nearest) => vk::Filter::NEAREST,
+            _ => vk::Filter::LINEAR,
+        };
+        let (min, mipmap, use_mips) = match s.min_filter() {
+            Some(MinFilter::Nearest) => {
+                (vk::Filter::NEAREST, vk::SamplerMipmapMode::NEAREST, false)
+            }
+            Some(MinFilter::Linear) => (vk::Filter::LINEAR, vk::SamplerMipmapMode::NEAREST, false),
+            Some(MinFilter::NearestMipmapNearest) => {
+                (vk::Filter::NEAREST, vk::SamplerMipmapMode::NEAREST, true)
+            }
+            Some(MinFilter::LinearMipmapNearest) => {
+                (vk::Filter::LINEAR, vk::SamplerMipmapMode::NEAREST, true)
+            }
+            Some(MinFilter::NearestMipmapLinear) => {
+                (vk::Filter::NEAREST, vk::SamplerMipmapMode::LINEAR, true)
+            }
+            Some(MinFilter::LinearMipmapLinear) | None => {
+                (vk::Filter::LINEAR, vk::SamplerMipmapMode::LINEAR, true)
+            }
+        };
+        Self {
+            wrap_u: wrap(s.wrap_s()),
+            wrap_v: wrap(s.wrap_t()),
+            mag,
+            min,
+            mipmap,
+            use_mips,
+        }
+    }
+}
+
 pub struct CpuMaterial {
     pub base_color: Vec4,
     /// Fragments with alpha below this are discarded. Negative = opaque
@@ -37,6 +103,7 @@ pub struct CpuMaterial {
     pub image: Option<usize>,
     /// Which TEXCOORD_n set the base color texture uses.
     pub tex_coord: u32,
+    pub sampler: SamplerKey,
 }
 
 pub struct CpuModel {
@@ -95,6 +162,11 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
     for mat in doc.materials() {
         let pbr = mat.pbr_metallic_roughness();
         let tex_coord = pbr.base_color_texture().map_or(0, |info| info.tex_coord());
+        let sampler = pbr
+            .base_color_texture()
+            .map_or_else(SamplerKey::default, |info| {
+                SamplerKey::from_gltf(&info.texture().sampler())
+            });
         let image = pbr
             .base_color_texture()
             .map(|info| info.texture().source().index());
@@ -128,6 +200,7 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
             double_sided: mat.double_sided(),
             image,
             tex_coord,
+            sampler,
         });
     }
     let default_material = model.materials.len();
@@ -137,6 +210,7 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
         double_sided: false,
         image: None,
         tex_coord: 0,
+        sampler: SamplerKey::default(),
     });
 
     let scene = doc.default_scene().or_else(|| doc.scenes().next());
