@@ -280,13 +280,9 @@ impl ApplicationHandler for App {
             } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let pressed = event.state == ElementState::Pressed;
-                    self.shared.input.borrow_mut().on_key(
-                        code,
-                        pressed,
-                        event.repeat,
-                        is_synthetic,
-                    );
-                    // Alt+Enter toggles fullscreen.
+                    // Alt+Enter toggles fullscreen. The Enter press is the
+                    // engine's, so scripts don't also see key_pressed("enter")
+                    // (its release is a no-op since it never counted as held).
                     if pressed
                         && !is_synthetic
                         && !event.repeat
@@ -300,7 +296,14 @@ impl ApplicationHandler for App {
                                 .then_some(Fullscreen::Borderless(None));
                             w.set_fullscreen(fs);
                         }
+                        return;
                     }
+                    self.shared.input.borrow_mut().on_key(
+                        code,
+                        pressed,
+                        event.repeat,
+                        is_synthetic,
+                    );
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
