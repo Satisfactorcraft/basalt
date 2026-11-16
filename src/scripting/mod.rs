@@ -842,13 +842,12 @@ mod tests {
                 .unwrap(),
             5
         );
-        assert_eq!(
-            lua.load("local y = 9; return load('return y')()")
-                .eval::<Value>()
-                .unwrap()
-                .is_nil(),
-            true
-        );
+        // Chunks from load() get the global env, not the caller's locals.
+        assert!(lua
+            .load("local y = 9; return load('return y')()")
+            .eval::<Value>()
+            .unwrap()
+            .is_nil());
         assert!(lua
             .load("return package.searchpath")
             .eval::<Value>()
