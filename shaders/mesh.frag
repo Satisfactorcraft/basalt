@@ -31,7 +31,9 @@ void main() {
         discard;
     }
 
-    vec3 n = normalize(in_normal);
+    // Faces flattened to zero area can still carry a zero normal; avoid NaN.
+    float len = length(in_normal);
+    vec3 n = len > 1e-12 ? in_normal / len : vec3(0.0, 1.0, 0.0);
     if (!gl_FrontFacing) {
         n = -n; // back face of a double-sided material
     }
