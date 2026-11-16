@@ -35,6 +35,8 @@ pub struct CpuMaterial {
     pub double_sided: bool,
     /// Index into `CpuModel::images`.
     pub image: Option<usize>,
+    /// Which TEXCOORD_n set the base color texture uses.
+    pub tex_coord: u32,
 }
 
 pub struct CpuModel {
@@ -92,6 +94,7 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
     let mut image_map: Vec<Option<usize>> = vec![None; images.len()];
     for mat in doc.materials() {
         let pbr = mat.pbr_metallic_roughness();
+        let tex_coord = pbr.base_color_texture().map_or(0, |info| info.tex_coord());
         let image = pbr
             .base_color_texture()
             .map(|info| info.texture().source().index());
@@ -124,6 +127,7 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
             alpha_cutoff,
             double_sided: mat.double_sided(),
             image,
+            tex_coord,
         });
     }
     let default_material = model.materials.len();
@@ -132,6 +136,7 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
         alpha_cutoff: -1.0,
         double_sided: false,
         image: None,
+        tex_coord: 0,
     });
 
     let scene = doc.default_scene().or_else(|| doc.scenes().next());
@@ -175,8 +180,18 @@ fn visit_node(
             };
             let positions: Vec<[f32; 3]> = positions.collect();
             let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
-            let uvs: Option<Vec<[f32; 2]>> =
-                reader.read_tex_coords(0).map(|t| t.into_f32().collect());
+            // UVs from the set the material's base color texture asks for.
+            let material = prim.material().index().unwrap_or(default_material);
+            let set = model.materials.get(material).map_or(0, |m| m.tex_coord);
+            let mut uvs: Option<Vec<[f32; 2]>> =
+                reader.read_tex_coords(set).map(|t| t.into_f32().collect());
+            if uvs.is_none() && set != 0 {
+                warn!(
+                    "{}: material wants TEXCOORD_{set}, which the mesh doesn't have; using TEXCOORD_0",
+                    path.display()
+                );
+                uvs = reader.read_tex_coords(0).map(|t| t.into_f32().collect());
+            }
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(i) => i.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
@@ -206,7 +221,7 @@ fn visit_node(
             model.primitives.push(Primitive {
                 first_index,
                 index_count: indices.len() as u32,
-                material: prim.material().index().unwrap_or(default_material),
+                material,
                 transform,
             });
         }
@@ -330,5 +345,37 @@ mod tests {
                 data.format
             );
         }
+    }
+
+    #[test]
+    fn base_color_uses_its_texcoord_set() {
+        let dir = std::env::temp_dir().join(format!("basalt-uv1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("game/models");
+        std::fs::copy(src.join("crate.bin"), dir.join("crate.bin")).unwrap();
+        let mut gltf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(src.join("crate.gltf")).unwrap())
+                .unwrap();
+        // TEXCOORD_1 = the normal floats read as VEC2: values differ from set 0.
+        gltf["accessors"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(
+                {"bufferView": 1, "componentType": 5126, "count": 24, "type": "VEC2"}
+            ));
+        gltf["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"] = 4.into();
+        std::fs::copy(src.join("../textures/crate.png"), dir.join("crate.png")).unwrap();
+        gltf["images"][0]["uri"] = "crate.png".into();
+        gltf["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["texCoord"] = 1.into();
+        std::fs::write(dir.join("m.gltf"), gltf.to_string()).unwrap();
+        let result = super::load_gltf(&dir.join("m.gltf"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let model = match result {
+            Ok(m) => m,
+            Err(e) => panic!("{e:#}"),
+        };
+        // Set 0 starts with (0, 1); the first normal is (1, 0, 0) -> (1, 0).
+        assert_eq!(model.vertices[0].uv, [1.0, 0.0]);
     }
 }
