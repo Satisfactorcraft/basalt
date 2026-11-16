@@ -171,12 +171,14 @@ impl App {
         let Some(watcher) = self.watcher.as_mut() else {
             return;
         };
-        let changed = watcher.poll(&self.fs);
-        if changed.is_empty() {
+        let changes = watcher.poll(&self.fs);
+        if changes.is_empty() {
             return;
         }
+        let changed = changes.paths;
         let current_level = self.shared.world.borrow().level_path.clone();
-        let (mut scripts, mut level, mut assets) = (false, false, false);
+        // A rescan means events were lost: reload everything to be safe.
+        let (mut scripts, mut level, mut assets) = (changes.rescan, changes.rescan, changes.rescan);
         for path in &changed {
             info!("changed: {path}");
             if path.ends_with(".lua") {
