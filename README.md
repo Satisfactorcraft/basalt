@@ -144,7 +144,7 @@ the game or block hot reload.
 | **input** | `key_down/pressed/released(name) mouse_down/pressed/released("left"\|"right"\|"middle") mouse_position() mouse_delta() scroll() lock_cursor(bool) cursor_locked()`. The lock applies at the end of the frame; `cursor_locked()` reports whether it actually took effect. |
 | **time** | `time.dt time.elapsed time.frame` |
 | **game** | `quit() read_file(path) file_exists(path) list_dir(path) window_size() set_title(s)` |
-| **json** | `decode(text) encode(value, pretty?)` |
+| **json** | `decode(text) encode(value, pretty?)`, `json.null`: a `null` inside a JSON array decodes to `json.null` (so arrays keep their length); a `null` object value decodes to `nil` |
 | **log** | `info/warn/error/debug(...)`; `print` goes to `log.info` |
 
 Key names: `a`–`z`, `0`–`9`, `f1`–`f12`, `space enter escape tab backspace

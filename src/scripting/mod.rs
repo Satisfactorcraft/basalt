@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Result};
 use log::{error, info, warn};
 use mlua::prelude::*;
-use mlua::{HookTriggers, LuaOptions, LuaSerdeExt, MultiValue, StdLib, Value, VmState};
+use mlua::{HookTriggers, LuaOptions, MultiValue, StdLib, Value, VmState};
 
 use crate::input::Input;
 use crate::scene::{EntityId, LevelDef, World};
@@ -512,7 +512,7 @@ impl ScriptHost {
         };
         let params = match params {
             serde_json::Value::Null => Value::Nil,
-            p => self.lua.to_value_with(&p, api::json_options())?,
+            p => api::json_to_lua(&self.lua, &p)?,
         };
         let inst = new_instance(&self.lua, &self.shared, id, script, name, params)?;
         self.instances.insert(id, inst);
@@ -1078,5 +1078,24 @@ mod tests {
         host.load_level("levels/l.json").unwrap();
         assert!(start.elapsed() < Duration::from_secs(2));
         assert!(host.instances.values().all(|i| i.failed));
+    }
+
+    #[test]
+    fn json_nulls() {
+        let (_g, host) = game("json-null", &[("game.json", "{}")]);
+        let r: (i64, i64, bool, bool, i64, String) = host
+            .lua
+            .load(
+                r#"
+                local t = json.decode('[1, null, 3]')
+                local n = 0
+                for _ in ipairs(t) do n = n + 1 end
+                local o = json.decode('{"speed": null, "x": 1}')
+                return #t, n, t[2] == json.null, o.speed == nil, (o.speed or 90), json.encode(t)
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(r, (3, 3, true, true, 90, "[1,null,3]".to_string()));
     }
 }
