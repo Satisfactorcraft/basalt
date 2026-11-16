@@ -48,22 +48,32 @@ impl GpuContext {
                 None,
             )?;
             let requirements = self.device.get_buffer_memory_requirements(handle);
-            let allocation = self
-                .allocator
-                .allocate(&AllocationCreateDesc {
-                    name,
-                    requirements,
-                    location,
-                    linear: true,
-                    allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-                })
-                .map_err(|e| anyhow!("buffer allocation failed: {e}"))?;
-            self.device
-                .bind_buffer_memory(handle, allocation.memory(), allocation.offset())?;
-            Ok(Buffer {
+            let allocation = match self.allocator.allocate(&AllocationCreateDesc {
+                name,
+                requirements,
+                location,
+                linear: true,
+                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+            }) {
+                Ok(a) => a,
+                Err(e) => {
+                    self.device.destroy_buffer(handle, None);
+                    return Err(anyhow!("buffer allocation failed: {e}"));
+                }
+            };
+            let buffer = Buffer {
                 handle,
                 allocation: Some(allocation),
-            })
+            };
+            let a = buffer.allocation.as_ref().unwrap();
+            if let Err(e) = self
+                .device
+                .bind_buffer_memory(handle, a.memory(), a.offset())
+            {
+                self.destroy_buffer(buffer);
+                return Err(e.into());
+            }
+            Ok(buffer)
         }
     }
 
@@ -88,16 +98,23 @@ impl GpuContext {
             MemoryLocation::CpuToGpu,
             "staging",
         )?;
-        staging
-            .mapped()
-            .ok_or_else(|| anyhow!("staging not mapped"))?[..data.len()]
-            .copy_from_slice(data);
-        let buffer = self.create_buffer(
+        let Some(mapped) = staging.mapped() else {
+            self.destroy_buffer(staging);
+            return Err(anyhow!("staging not mapped"));
+        };
+        mapped[..data.len()].copy_from_slice(data);
+        let buffer = match self.create_buffer(
             size,
             usage | vk::BufferUsageFlags::TRANSFER_DST,
             MemoryLocation::GpuOnly,
             name,
-        )?;
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                self.destroy_buffer(staging);
+                return Err(e);
+            }
+        };
         let result = self.one_shot(|cmd| unsafe {
             self.device.cmd_copy_buffer(
                 cmd,
@@ -127,18 +144,31 @@ impl GpuContext {
         unsafe {
             let image = self.device.create_image(info, None)?;
             let requirements = self.device.get_image_memory_requirements(image);
-            let allocation = self
-                .allocator
-                .allocate(&AllocationCreateDesc {
-                    name,
-                    requirements,
-                    location: MemoryLocation::GpuOnly,
-                    linear: false,
-                    allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-                })
-                .map_err(|e| anyhow!("image allocation failed: {e}"))?;
-            self.device
-                .bind_image_memory(image, allocation.memory(), allocation.offset())?;
+            let allocation = match self.allocator.allocate(&AllocationCreateDesc {
+                name,
+                requirements,
+                location: MemoryLocation::GpuOnly,
+                linear: false,
+                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+            }) {
+                Ok(a) => a,
+                Err(e) => {
+                    self.device.destroy_image(image, None);
+                    return Err(anyhow!("image allocation failed: {e}"));
+                }
+            };
+            // From here on, failures clean up through destroy_texture
+            // (destroying a null view is a no-op).
+            let mut tex = Texture {
+                image,
+                view: vk::ImageView::null(),
+                allocation: Some(allocation),
+            };
+            let a = tex.allocation.as_ref().unwrap();
+            if let Err(e) = self.device.bind_image_memory(image, a.memory(), a.offset()) {
+                self.destroy_texture(tex);
+                return Err(e.into());
+            }
             let view = self.device.create_image_view(
                 &vk::ImageViewCreateInfo::default()
                     .image(image)
@@ -152,12 +182,17 @@ impl GpuContext {
                         layer_count: 1,
                     }),
                 None,
-            )?;
-            Ok(Texture {
-                image,
-                view,
-                allocation: Some(allocation),
-            })
+            );
+            match view {
+                Ok(view) => {
+                    tex.view = view;
+                    Ok(tex)
+                }
+                Err(e) => {
+                    self.destroy_texture(tex);
+                    Err(e.into())
+                }
+            }
         }
     }
 
@@ -210,16 +245,24 @@ impl GpuContext {
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let tex = self.create_image(&info, vk::ImageAspectFlags::COLOR, name)?;
 
-        let mut staging = self.create_buffer(
+        let mut staging = match self.create_buffer(
             img.rgba.len() as u64,
             vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::CpuToGpu,
             "texture staging",
-        )?;
-        staging
-            .mapped()
-            .ok_or_else(|| anyhow!("staging not mapped"))?[..img.rgba.len()]
-            .copy_from_slice(&img.rgba);
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                self.destroy_texture(tex);
+                return Err(e);
+            }
+        };
+        let Some(mapped) = staging.mapped() else {
+            self.destroy_buffer(staging);
+            self.destroy_texture(tex);
+            return Err(anyhow!("staging not mapped"));
+        };
+        mapped[..img.rgba.len()].copy_from_slice(&img.rgba);
 
         let device = &self.device;
         let image = tex.image;

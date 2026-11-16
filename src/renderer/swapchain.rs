@@ -132,18 +132,48 @@ impl Swapchain {
             .clipped(true)
             .old_swapchain(old);
         let handle = unsafe { ctx.swapchain_loader.create_swapchain(&info, None)? };
-        let images = unsafe { ctx.swapchain_loader.get_swapchain_images(handle)? };
+        // Fill in the rest; on failure release what exists, swapchain too.
+        let mut sc = Self {
+            handle,
+            format: format.format,
+            srgb,
+            extent,
+            images: Vec::new(),
+            views: Vec::new(),
+            render_finished: Vec::new(),
+            depth: Texture {
+                image: vk::Image::null(),
+                view: vk::ImageView::null(),
+                allocation: None,
+            },
+            depth_format: vk::Format::UNDEFINED,
+        };
+        if let Err(e) = sc.create_resources(ctx) {
+            let handle = sc.destroy(ctx);
+            unsafe { ctx.swapchain_loader.destroy_swapchain(handle, None) };
+            return Err(e);
+        }
+        info!(
+            "swapchain {}x{} {:?} {:?}, {} images",
+            extent.width,
+            extent.height,
+            format.format,
+            present_mode,
+            sc.images.len()
+        );
+        Ok(sc)
+    }
 
-        let mut views = Vec::with_capacity(images.len());
-        let mut render_finished = Vec::with_capacity(images.len());
-        for &image in &images {
+    fn create_resources(&mut self, ctx: &mut GpuContext) -> Result<()> {
+        self.images = unsafe { ctx.swapchain_loader.get_swapchain_images(self.handle)? };
+        for &image in &self.images {
             unsafe {
-                views.push(
+                self.views.push(
                     ctx.device.create_image_view(
                         &vk::ImageViewCreateInfo::default()
                             .image(image)
                             .view_type(vk::ImageViewType::TYPE_2D)
-                            .format(format.format)
+                            .format(self.format)
                             .subresource_range(vk::ImageSubresourceRange {
                                 aspect_mask: vk::ImageAspectFlags::COLOR,
                                 base_mip_level: 0,
@@ -154,21 +184,21 @@ impl Swapchain {
                         None,
                     )?,
                 );
-                render_finished.push(
+                self.render_finished.push(
                     ctx.device
                         .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?,
                 );
             }
         }
 
-        let depth_format = pick_depth_format(ctx)?;
-        let depth = ctx.create_image(
+        self.depth_format = pick_depth_format(ctx)?;
+        self.depth = ctx.create_image(
             &vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
-                .format(depth_format)
+                .format(self.depth_format)
                 .extent(vk::Extent3D {
-                    width: extent.width,
-                    height: extent.height,
+                    width: self.extent.width,
+                    height: self.extent.height,
                     depth: 1,
                 })
                 .mip_levels(1)
@@ -180,26 +210,7 @@ impl Swapchain {
             vk::ImageAspectFlags::DEPTH,
             "depth",
         )?;
-
-        info!(
-            "swapchain {}x{} {:?} {:?}, {} images",
-            extent.width,
-            extent.height,
-            format.format,
-            present_mode,
-            images.len()
-        );
-        Ok(Self {
-            handle,
-            format: format.format,
-            srgb,
-            extent,
-            images,
-            views,
-            render_finished,
-            depth,
-            depth_format,
-        })
+        Ok(())
     }
 
     /// Destroys everything except the swapchain handle itself, which is

@@ -91,17 +91,44 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(window: &Window, fs: GameFs, title: &str, vsync: bool) -> Result<Self> {
-        let mut ctx = GpuContext::new(window, title)?;
-        let device = ctx.device.clone();
+        let ctx = GpuContext::new(window, title)?;
         let size = window.inner_size();
+        // Start with null handles and fill them in. If any step fails,
+        // dropping `renderer` releases exactly what was created so far
+        // (destroying a null Vulkan handle is a no-op).
+        let mut renderer = Self {
+            fs,
+            vsync,
+            window_size: (size.width, size.height),
+            needs_resize: false,
+            swapchain: None,
+            frame_layout: vk::DescriptorSetLayout::null(),
+            material_layout: vk::DescriptorSetLayout::null(),
+            pipeline_layout: vk::PipelineLayout::null(),
+            pipeline: vk::Pipeline::null(),
+            pipeline_formats: (vk::Format::UNDEFINED, vk::Format::UNDEFINED),
+            descriptor_pool: vk::DescriptorPool::null(),
+            command_pool: vk::CommandPool::null(),
+            samplers: HashMap::new(),
+            white: None,
+            frames: Vec::new(),
+            frame_index: 0,
+            models: HashMap::new(),
+            ctx,
+        };
+        renderer.init()?;
+        Ok(renderer)
+    }
 
+    fn init(&mut self) -> Result<()> {
+        let device = self.ctx.device.clone();
         unsafe {
             let frame_bindings = [vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)];
-            let frame_layout = device.create_descriptor_set_layout(
+            self.frame_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&frame_bindings),
                 None,
             )?;
@@ -110,16 +137,16 @@ impl Renderer {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
-            let material_layout = device.create_descriptor_set_layout(
+            self.material_layout = device.create_descriptor_set_layout(
                 &vk::DescriptorSetLayoutCreateInfo::default().bindings(&material_bindings),
                 None,
             )?;
-            let set_layouts = [frame_layout, material_layout];
+            let set_layouts = [self.frame_layout, self.material_layout];
             let push_ranges = [vk::PushConstantRange::default()
                 .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
                 .offset(0)
                 .size(std::mem::size_of::<DrawPush>() as u32)];
-            let pipeline_layout = device.create_pipeline_layout(
+            self.pipeline_layout = device.create_pipeline_layout(
                 &vk::PipelineLayoutCreateInfo::default()
                     .set_layouts(&set_layouts)
                     .push_constant_ranges(&push_ranges),
@@ -136,7 +163,7 @@ impl Renderer {
                     descriptor_count: MAX_MATERIALS,
                 },
             ];
-            let descriptor_pool = device.create_descriptor_pool(
+            self.descriptor_pool = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
                     .max_sets(MAX_MATERIALS + FRAMES_IN_FLIGHT as u32)
@@ -144,14 +171,14 @@ impl Renderer {
                 None,
             )?;
 
-            let command_pool = device.create_command_pool(
+            self.command_pool = device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
-                    .queue_family_index(ctx.queue_family)
+                    .queue_family_index(self.ctx.queue_family)
                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
                 None,
             )?;
 
-            let white = ctx.upload_texture(
+            self.white = Some(self.ctx.upload_texture(
                 &Image2d {
                     width: 1,
                     height: 1,
@@ -159,23 +186,23 @@ impl Renderer {
                 },
                 true,
                 "white",
-            )?;
+            )?);
 
+            // Command buffers and descriptor sets are freed with their pools.
             let cmds = device.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(command_pool)
+                    .command_pool(self.command_pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(FRAMES_IN_FLIGHT as u32),
             )?;
-            let layouts = [frame_layout; FRAMES_IN_FLIGHT];
+            let layouts = [self.frame_layout; FRAMES_IN_FLIGHT];
             let sets = device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(descriptor_pool)
+                    .descriptor_pool(self.descriptor_pool)
                     .set_layouts(&layouts),
             )?;
-            let mut frames = Vec::new();
             for i in 0..FRAMES_IN_FLIGHT {
-                let ubo = ctx.create_buffer(
+                let ubo = self.ctx.create_buffer(
                     std::mem::size_of::<FrameData>() as u64,
                     vk::BufferUsageFlags::UNIFORM_BUFFER,
                     MemoryLocation::CpuToGpu,
@@ -194,42 +221,25 @@ impl Renderer {
                         .buffer_info(&buffer_info)],
                     &[],
                 );
-                frames.push(Frame {
+                // Owned by self.frames before the sync objects exist, so a
+                // failure below still releases the buffer.
+                self.frames.push(Frame {
                     cmd: cmds[i],
-                    image_available: device
-                        .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?,
-                    in_flight: device.create_fence(
-                        &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
-                        None,
-                    )?,
+                    image_available: vk::Semaphore::null(),
+                    in_flight: vk::Fence::null(),
                     ubo,
                     set: sets[i],
                 });
+                let frame = self.frames.last_mut().unwrap();
+                frame.image_available =
+                    device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?;
+                frame.in_flight = device.create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )?;
             }
-
-            let mut renderer = Self {
-                fs,
-                vsync,
-                window_size: (size.width, size.height),
-                needs_resize: false,
-                swapchain: None,
-                frame_layout,
-                material_layout,
-                pipeline_layout,
-                pipeline: vk::Pipeline::null(),
-                pipeline_formats: (vk::Format::UNDEFINED, vk::Format::UNDEFINED),
-                descriptor_pool,
-                command_pool,
-                samplers: HashMap::new(),
-                white: Some(white),
-                frames,
-                frame_index: 0,
-                models: HashMap::new(),
-                ctx,
-            };
-            renderer.recreate_swapchain()?;
-            Ok(renderer)
         }
+        self.recreate_swapchain()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -276,6 +286,9 @@ impl Renderer {
         unsafe {
             if self.pipeline != vk::Pipeline::null() {
                 device.destroy_pipeline(self.pipeline, None);
+                // Don't leave a dangling handle for Drop if creation fails.
+                self.pipeline = vk::Pipeline::null();
+                self.pipeline_formats = (vk::Format::UNDEFINED, vk::Format::UNDEFINED);
             }
             let vert_code = ash::util::read_spv(&mut Cursor::new(VERT_SPV))?;
             let frag_code = ash::util::read_spv(&mut Cursor::new(FRAG_SPV))?;
@@ -283,10 +296,16 @@ impl Renderer {
                 &vk::ShaderModuleCreateInfo::default().code(&vert_code),
                 None,
             )?;
-            let frag = device.create_shader_module(
+            let frag = match device.create_shader_module(
                 &vk::ShaderModuleCreateInfo::default().code(&frag_code),
                 None,
-            )?;
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    device.destroy_shader_module(vert, None);
+                    return Err(e.into());
+                }
+            };
 
             let stages = [
                 vk::PipelineShaderStageCreateInfo::default()
@@ -447,11 +466,17 @@ impl Renderer {
             vk::BufferUsageFlags::VERTEX_BUFFER,
             path,
         )?;
-        let index_buffer = ctx.upload_buffer(
+        let index_buffer = match ctx.upload_buffer(
             as_bytes(&cpu.indices),
             vk::BufferUsageFlags::INDEX_BUFFER,
             path,
-        )?;
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                ctx.destroy_buffer(vertex_buffer);
+                return Err(e);
+            }
+        };
         let mut model = GpuModel {
             vertex_buffer,
             index_buffer,
