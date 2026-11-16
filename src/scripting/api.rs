@@ -97,7 +97,8 @@ pub fn install(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, ()| {
             let s = shared(lua);
             let w = s.world.borrow();
-            Ok(w.iter()
+            Ok(w.iter_spawn_order()
+                .into_iter()
                 .filter(|(_, e)| !e.pending_destroy)
                 .map(|(id, _)| LuaEntity(id))
                 .collect::<Vec<_>>())
@@ -106,13 +107,7 @@ pub fn install(lua: &Lua) -> LuaResult<()> {
     scene.set(
         "camera",
         lua.create_function(|lua, ()| {
-            let s = shared(lua);
-            let w = s.world.borrow();
-            let cam = w
-                .iter()
-                .find(|(_, e)| e.camera.is_some() && !e.pending_destroy)
-                .map(|(id, _)| LuaEntity(id));
-            Ok(cam)
+            Ok(shared(lua).world.borrow().active_camera_id().map(LuaEntity))
         })?,
     )?;
     scene.set("spawn", lua.create_function(spawn)?)?;

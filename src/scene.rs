@@ -153,6 +153,9 @@ impl Default for Environment {
 
 struct Slot {
     generation: u32,
+    /// Spawn sequence number of the current entity. Slots get reused in any
+    /// order, so "first" (active camera, find) is decided by this instead.
+    seq: u64,
     entity: Option<Entity>,
 }
 
@@ -171,9 +174,11 @@ impl World {
         if entity.name.is_empty() {
             entity.name = format!("entity_{}", self.spawn_counter);
         }
+        let seq = self.spawn_counter;
         if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
             slot.entity = Some(entity);
+            slot.seq = seq;
             EntityId {
                 index,
                 generation: slot.generation,
@@ -181,6 +186,7 @@ impl World {
         } else {
             self.slots.push(Slot {
                 generation: 0,
+                seq,
                 entity: Some(entity),
             });
             EntityId {
@@ -233,8 +239,28 @@ impl World {
         self.iter().map(|(id, _)| id).collect()
     }
 
+    /// Live entities in spawn order (level file order, then runtime spawns).
+    pub fn iter_spawn_order(&self) -> Vec<(EntityId, &Entity)> {
+        let mut v: Vec<(u64, EntityId, &Entity)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let id = EntityId {
+                    index: i as u32,
+                    generation: s.generation,
+                };
+                s.entity.as_ref().map(|e| (s.seq, id, e))
+            })
+            .collect();
+        v.sort_unstable_by_key(|(seq, _, _)| *seq);
+        v.into_iter().map(|(_, id, e)| (id, e)).collect()
+    }
+
+    /// The earliest-spawned live entity with this name.
     pub fn find(&self, name: &str) -> Option<EntityId> {
-        self.iter()
+        self.iter_spawn_order()
+            .into_iter()
             .find(|(_, e)| e.name == name && !e.pending_destroy)
             .map(|(id, _)| id)
     }
@@ -245,13 +271,17 @@ impl World {
         }
     }
 
-    /// The first live entity with a camera component.
+    /// The earliest-spawned live entity with a camera component.
+    pub fn active_camera_id(&self) -> Option<EntityId> {
+        self.iter_spawn_order()
+            .into_iter()
+            .find(|(_, e)| e.camera.is_some() && !e.pending_destroy)
+            .map(|(id, _)| id)
+    }
+
     pub fn active_camera(&self) -> Option<(Transform, Camera)> {
-        self.iter().find_map(|(_, e)| {
-            e.camera
-                .filter(|_| !e.pending_destroy)
-                .map(|c| (e.transform, c))
-        })
+        let e = self.get(self.active_camera_id()?)?;
+        Some((e.transform, e.camera?))
     }
 }
 
@@ -381,7 +411,49 @@ impl LevelDef {
 
 #[cfg(test)]
 mod tests {
-    use super::Camera;
+    use super::{Camera, Entity, World};
+
+    fn named(name: &str, camera: bool) -> Entity {
+        Entity {
+            name: name.into(),
+            camera: camera.then(Camera::default),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn first_means_spawn_order_across_reuse() {
+        let mut w = World::default();
+        let load = |w: &mut World| {
+            w.clear();
+            for (n, c) in [
+                ("camA", true),
+                ("dup", false),
+                ("camB", true),
+                ("dup", false),
+            ] {
+                w.spawn(named(n, c));
+            }
+        };
+        load(&mut w);
+        let first_dup = w.find("dup").unwrap();
+        assert_eq!(w.get(w.active_camera_id().unwrap()).unwrap().name, "camA");
+        // Reload: slots come back from the free list in reverse.
+        load(&mut w);
+        assert_eq!(w.get(w.active_camera_id().unwrap()).unwrap().name, "camA");
+        let names: Vec<_> = w
+            .iter_spawn_order()
+            .iter()
+            .map(|(_, e)| e.name.clone())
+            .collect();
+        assert_eq!(names, ["camA", "dup", "camB", "dup"]);
+        assert_ne!(w.find("dup"), Some(first_dup), "old handle must not alias");
+        // Runtime churn: a camera spawned later must not win by taking a low slot.
+        let a = w.active_camera_id().unwrap();
+        w.despawn(a);
+        w.spawn(named("late_cam", true));
+        assert_eq!(w.get(w.active_camera_id().unwrap()).unwrap().name, "camB");
+    }
 
     #[test]
     fn camera_validation() {

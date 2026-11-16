@@ -95,7 +95,8 @@ Entity fields: `name`, `model`, `position`, `rotation` (Euler degrees
 `script`, `params` (any JSON, handed to the script as `self.params`).
 Unknown fields are an error, so typos don't fail silently.
 
-The first entity with a `camera` is the active camera. Coordinates are
+The first entity with a `camera` (in level-file order, then runtime spawns) is
+the active camera; this stays the same across level reloads. Coordinates are
 right-handed, Y up, -Z forward (same as glTF).
 
 ### Scripts
