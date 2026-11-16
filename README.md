@@ -43,7 +43,7 @@ Override with `BASALT_VALIDATION=1` / `0`. More logging: `RUST_LOG=debug`.
 
 ```
 game/
-  game.json            required: title, window, start level
+  game.json            required file (every field in it is optional)
   levels/*.json        scenes: entities + lighting
   models/*.gltf|.glb   glTF 2.0 (+ .bin buffers)
   textures/*.png|.jpg  referenced by the models
@@ -141,7 +141,7 @@ the game or block hot reload.
 | **vec3** | `vec3(x, y, z)`, `vec3(s)`; fields `x y z`; `+ - * /` with vec3 or numbers; `:length() :normalized() :dot(v) :cross(v) :distance(v) :lerp(v, t) :copy() :unpack()` |
 | **entity** | fields `name position rotation scale model visible` (read/write), `id`, `script_path`; methods `:valid() :destroy() :translate(v) :translate_local(v) :rotate(axis, deg) :rotate_local(axis, deg) :rotate_x/y/z(deg) :look_at(target, up?) :forward() :right() :up() :script()` |
 | **scene** | `find(name) all() camera() spawn{...} load_level(path) reload_level() level() set_clear_color(r,g,b,a?) set_sun(dir, color?) set_ambient(color)` |
-| **input** | `key_down/pressed/released(name) mouse_down/pressed/released("left"\|"right"\|"middle") mouse_position() mouse_delta() scroll() lock_cursor(bool) cursor_locked()`. The lock applies at the end of the frame; `cursor_locked()` reports whether it actually took effect. |
+| **input** | `key_down/pressed/released(name) mouse_down/pressed/released("left"\|"right"\|"middle"\|"back"\|"forward") mouse_position() mouse_delta() scroll() lock_cursor(bool) cursor_locked()`. The lock applies at the end of the frame; `cursor_locked()` reports whether it actually took effect. |
 | **time** | `time.dt time.elapsed time.frame` |
 | **game** | `quit() read_file(path) file_exists(path) list_dir(path) window_size() set_title(s)` |
 | **json** | `decode(text) encode(value, pretty?)`, `json.null`: a `null` inside a JSON array decodes to `json.null` (so arrays keep their length); a `null` object value decodes to `nil` |

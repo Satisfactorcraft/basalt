@@ -20,7 +20,7 @@
 - Bug hunts: when asked to find bugs, file one GitHub issue per bug (label `bug`)
   and do NOT fix them in the same pass. Say in each issue whether it was
   reproduced or only found in code review.
-- Known bugs are tracked as GitHub issues (#2–#17 from the first hunt). Check
+- Known bugs are tracked as GitHub issues labeled `bug-hunt` (or `bug`). Check
   open issues before fixing something or filing a duplicate.
 
 ## Lessons learned (v1 build)
@@ -44,8 +44,8 @@
 - A cold `cargo build` takes over 2 minutes (Lua is built from source);
   run it in the background.
 - Windows: cross-compile with `cargo build --target x86_64-pc-windows-gnu`
-  (needs the `gcc-mingw-w64-x86-64` package). It compiles but has never been
-  run on real Windows. See issue #3.
+  (needs the `gcc-mingw-w64-x86-64` package). The test suite runs as a Windows
+  exe under wine (see below), but rendering has never run on real Windows.
 - For Lua-side repros, add a throwaway `#[test]` using the `game()` helper in
   `src/scripting/mod.rs` tests, in a scratch copy of the source, built with
   `CARGO_TARGET_DIR=<repo>/target` so it reuses the compiled deps.

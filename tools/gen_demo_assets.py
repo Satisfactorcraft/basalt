@@ -41,8 +41,11 @@ def checker(x, y):
     return (v, v, v + 8, 255)
 
 
+CRATE_SIZE = 128
+
+
 def crate(x, y):
-    size = 128
+    size = CRATE_SIZE
     border = x < 10 or y < 10 or x >= size - 10 or y >= size - 10
     diagonal = abs(x - y) < 7 or abs(x - (size - 1 - y)) < 7
     grain = int(12 * math.sin(y * 0.35 + math.sin(x * 0.05) * 3))
@@ -132,7 +135,7 @@ def main():
     os.makedirs(os.path.join(ROOT, "models"), exist_ok=True)
     os.makedirs(os.path.join(ROOT, "textures"), exist_ok=True)
     write_png(os.path.join(ROOT, "textures", "checker.png"), 256, 256, checker)
-    write_png(os.path.join(ROOT, "textures", "crate.png"), 128, 128, crate)
+    write_png(os.path.join(ROOT, "textures", "crate.png"), CRATE_SIZE, CRATE_SIZE, crate)
 
     cube_faces = [
         ((1, 0, 0), (0, 0, -1), (0, 1, 0)),

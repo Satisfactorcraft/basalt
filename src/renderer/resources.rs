@@ -213,13 +213,18 @@ impl GpuContext {
         } else {
             vk::Format::R8G8B8A8_UNORM
         };
-        let can_blit = unsafe {
+        // Mips are generated with linear blits, which needs all three.
+        let can_generate_mips = unsafe {
             self.instance
                 .get_physical_device_format_properties(self.physical, format)
         }
         .optimal_tiling_features
-        .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR);
-        let mip_levels = if can_blit {
+        .contains(
+            vk::FormatFeatureFlags::BLIT_SRC
+                | vk::FormatFeatureFlags::BLIT_DST
+                | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR,
+        );
+        let mip_levels = if can_generate_mips {
             32 - img.width.max(img.height).max(1).leading_zeros()
         } else {
             1

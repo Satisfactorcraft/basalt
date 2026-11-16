@@ -85,6 +85,9 @@ struct App {
     fatal: Option<anyhow::Error>,
 }
 
+/// Touchpads report scrolling in pixels; scripts get "lines" like a wheel.
+const PIXELS_PER_SCROLL_LINE: f32 = 40.0;
+
 /// Script update rate while the window is minimized.
 const BACKGROUND_TICK: Duration = Duration::from_millis(33);
 
@@ -323,7 +326,7 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / PIXELS_PER_SCROLL_LINE,
                 };
                 self.shared.input.borrow_mut().on_scroll(amount);
             }

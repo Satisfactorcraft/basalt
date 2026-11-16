@@ -551,7 +551,7 @@ impl ScriptHost {
         }
     }
 
-    // -- classes --------------------------------------------------------------
+    // -- notifications ----------------------------------------------------------
 
     /// Calls `on_file_changed(path)` on every running script instance, once
     /// per changed game-relative path.
@@ -581,6 +581,8 @@ impl ScriptHost {
             }
         }
     }
+
+    // -- classes --------------------------------------------------------------
 
     /// Recompiles every script in use and swaps it under live instances.
     pub fn reload_scripts(&mut self) {
