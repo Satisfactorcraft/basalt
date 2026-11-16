@@ -7,6 +7,7 @@ layout(set = 0, binding = 0) uniform FrameData {
     vec4 sun_dir;      // xyz = direction the light travels (normalized)
     vec4 sun_color;    // rgb = color * intensity
     vec4 ambient;      // rgb = ambient color
+    vec4 params;       // x = 1: gamma-encode in the shader (non-sRGB swapchain)
 } frame;
 
 // Per-draw data.

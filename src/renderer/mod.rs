@@ -38,6 +38,8 @@ struct FrameData {
     sun_dir: [f32; 4],
     sun_color: [f32; 4],
     ambient: [f32; 4],
+    /// x = 1 when the shader must gamma-encode (non-sRGB swapchain).
+    params: [f32; 4],
 }
 
 #[repr(C)]
@@ -571,6 +573,7 @@ impl Renderer {
                 sun_dir: env.sun_direction.extend(0.0).into(),
                 sun_color: env.sun_color.extend(0.0).into(),
                 ambient: env.ambient.extend(0.0).into(),
+                params: [if sc.srgb { 0.0 } else { 1.0 }, 0.0, 0.0, 0.0],
             };
             let frame = &mut self.frames[self.frame_index];
             frame
@@ -628,7 +631,14 @@ impl Renderer {
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
                     color: vk::ClearColorValue {
-                        float32: env.clear_color,
+                        // The clear bypasses the shader, so a non-sRGB
+                        // swapchain needs the color encoded here.
+                        float32: if sc.srgb {
+                            env.clear_color
+                        } else {
+                            let [r, g, b, a] = env.clear_color;
+                            [linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b), a]
+                        },
                     },
                 })];
             let depth_attachment = vk::RenderingAttachmentInfo::default()
@@ -776,6 +786,16 @@ impl Renderer {
         }
         self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
         Ok(())
+    }
+}
+
+/// The sRGB transfer function (same curve as the fragment shader).
+fn linear_to_srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c < 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
     }
 }
 

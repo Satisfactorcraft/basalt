@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use ash::vk;
-use log::info;
+use log::{info, warn};
 
 use super::context::GpuContext;
 use super::resources::Texture;
@@ -10,6 +10,8 @@ use super::resources::Texture;
 pub struct Swapchain {
     pub handle: vk::SwapchainKHR,
     pub format: vk::Format,
+    /// The format gamma-encodes on write. If not, the shader must.
+    pub srgb: bool,
     pub extent: vk::Extent2D,
     pub images: Vec<vk::Image>,
     pub views: Vec<vk::ImageView>,
@@ -64,6 +66,18 @@ impl Swapchain {
             .or(formats.first())
             .copied()
             .ok_or_else(|| anyhow!("surface has no formats"))?;
+        let srgb = matches!(
+            format.format,
+            vk::Format::B8G8R8A8_SRGB
+                | vk::Format::R8G8B8A8_SRGB
+                | vk::Format::A8B8G8R8_SRGB_PACK32
+        );
+        if !srgb {
+            warn!(
+                "no sRGB swapchain format available, using {:?} with gamma applied in the shader",
+                format.format
+            );
+        }
 
         let modes = unsafe {
             ctx.surface_loader
@@ -178,6 +192,7 @@ impl Swapchain {
         Ok(Self {
             handle,
             format: format.format,
+            srgb,
             extent,
             images,
             views,

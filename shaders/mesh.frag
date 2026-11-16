@@ -6,6 +6,7 @@ layout(set = 0, binding = 0) uniform FrameData {
     vec4 sun_dir;
     vec4 sun_color;
     vec4 ambient;
+    vec4 params;
 } frame;
 
 layout(set = 1, binding = 0) uniform sampler2D base_color_tex;
@@ -47,6 +48,11 @@ void main() {
     vec3 color = albedo.rgb * (frame.ambient.rgb + frame.sun_color.rgb * diffuse)
                + frame.sun_color.rgb * specular;
 
-    // Swapchain is sRGB, so the hardware does the gamma encode.
+    // Normally the swapchain is sRGB and the hardware gamma-encodes. If only
+    // a UNORM format was available, apply the sRGB curve here instead.
+    if (frame.params.x > 0.5) {
+        vec3 c = clamp(color, 0.0, 1.0);
+        color = mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
+    }
     out_color = vec4(color, 1.0);
 }
