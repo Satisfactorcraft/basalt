@@ -151,7 +151,8 @@ Key names: `a`–`z`, `0`–`9`, `f1`–`f12`, `space enter escape tab backspace
 delete insert home end pageup pagedown left right up down`, `shift ctrl alt`
 (either side) or `lshift rshift lctrl rctrl lalt ralt`, plus punctuation
 (`-`, `=`, `[`, `]`, `;`, `'`, `,`, `.`, `/`, `\`). They're physical keys, so
-`w` is the same spot on AZERTY.
+`w` is the same spot on AZERTY. An unknown key or button name (e.g. `"Space"`) logs a
+warning once and always reads as not pressed.
 
 Positions/rotations are returned as copies: `local p = e.position; p.y = 2;
 e.position = p`. `scene.spawn` takes the same fields as a level entity
