@@ -94,105 +94,127 @@ impl GpuContext {
         let instance = unsafe { entry.create_instance(&instance_info, None) }
             .context("failed to create Vulkan instance (Vulkan 1.3 required)")?;
 
-        let debug = if validation {
-            let loader = ext::debug_utils::Instance::new(&entry, &instance);
-            let info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-                .message_severity(
-                    vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
-                        | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
-                )
-                .message_type(
-                    vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                        | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                        | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-                )
-                .pfn_user_callback(Some(debug_callback));
-            let messenger = unsafe { loader.create_debug_utils_messenger(&info, None)? };
-            info!("Vulkan validation layer enabled");
-            Some((loader, messenger))
-        } else {
-            None
-        };
-
+        // Everything below is created step by step; on failure, release
+        // what exists in reverse order instead of leaking it.
+        let mut debug = None;
+        let mut surface = vk::SurfaceKHR::null();
         let surface_loader = khr::surface::Instance::new(&entry, &instance);
-        let surface = unsafe {
-            ash_window::create_surface(
-                &entry,
-                &instance,
-                display,
-                window.window_handle()?.as_raw(),
-                None,
-            )?
-        };
+        let mut device: Option<ash::Device> = None;
+        let result = (|| -> Result<Self> {
+            if validation {
+                let loader = ext::debug_utils::Instance::new(&entry, &instance);
+                let info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+                    .message_severity(
+                        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                            | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
+                    )
+                    .message_type(
+                        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                            | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                            | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                    )
+                    .pfn_user_callback(Some(debug_callback));
+                let messenger = unsafe { loader.create_debug_utils_messenger(&info, None)? };
+                info!("Vulkan validation layer enabled");
+                debug = Some((loader, messenger));
+            }
 
-        let (physical, queue_family) = pick_device(&instance, &surface_loader, surface)?;
-        let props = unsafe { instance.get_physical_device_properties(physical) };
-        let name = props
-            .device_name_as_c_str()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        info!(
-            "GPU: {name} (Vulkan {}.{}.{})",
-            vk::api_version_major(props.api_version),
-            vk::api_version_minor(props.api_version),
-            vk::api_version_patch(props.api_version)
-        );
+            surface = unsafe {
+                ash_window::create_surface(
+                    &entry,
+                    &instance,
+                    display,
+                    window.window_handle()?.as_raw(),
+                    None,
+                )?
+            };
 
-        let base_features = unsafe { instance.get_physical_device_features(physical) };
-        let anisotropy = base_features.sampler_anisotropy == vk::TRUE;
-        let features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(anisotropy);
-        let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
-            .dynamic_rendering(true)
-            .synchronization2(true);
-        let priorities = [1.0];
-        let queue_infos = [vk::DeviceQueueCreateInfo::default()
-            .queue_family_index(queue_family)
-            .queue_priorities(&priorities)];
-        let device_extensions = [khr::swapchain::NAME.as_ptr()];
-        let device_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(&queue_infos)
-            .enabled_extension_names(&device_extensions)
-            .enabled_features(&features)
-            .push_next(&mut features13);
-        let device = unsafe { instance.create_device(physical, &device_info, None) }
-            .context("failed to create Vulkan device")?;
-        let queue = unsafe { device.get_device_queue(queue_family, 0) };
-        let swapchain_loader = khr::swapchain::Device::new(&instance, &device);
+            let (physical, queue_family) = pick_device(&instance, &surface_loader, surface)?;
+            let props = unsafe { instance.get_physical_device_properties(physical) };
+            let name = props
+                .device_name_as_c_str()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            info!(
+                "GPU: {name} (Vulkan {}.{}.{})",
+                vk::api_version_major(props.api_version),
+                vk::api_version_minor(props.api_version),
+                vk::api_version_patch(props.api_version)
+            );
 
-        let allocator = Allocator::new(&AllocatorCreateDesc {
-            instance: instance.clone(),
-            device: device.clone(),
-            physical_device: physical,
-            debug_settings: Default::default(),
-            buffer_device_address: false,
-            allocation_sizes: Default::default(),
-        })
-        .map_err(|e| anyhow!("failed to create GPU allocator: {e}"))?;
+            let base_features = unsafe { instance.get_physical_device_features(physical) };
+            let anisotropy = base_features.sampler_anisotropy == vk::TRUE;
+            let features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(anisotropy);
+            let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
+                .dynamic_rendering(true)
+                .synchronization2(true);
+            let priorities = [1.0];
+            let queue_infos = [vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(queue_family)
+                .queue_priorities(&priorities)];
+            let device_extensions = [khr::swapchain::NAME.as_ptr()];
+            let device_info = vk::DeviceCreateInfo::default()
+                .queue_create_infos(&queue_infos)
+                .enabled_extension_names(&device_extensions)
+                .enabled_features(&features)
+                .push_next(&mut features13);
+            let dev = unsafe { instance.create_device(physical, &device_info, None) }
+                .context("failed to create Vulkan device")?;
+            device = Some(dev.clone());
+            let queue = unsafe { dev.get_device_queue(queue_family, 0) };
+            let swapchain_loader = khr::swapchain::Device::new(&instance, &dev);
 
-        let upload_pool = unsafe {
-            device.create_command_pool(
-                &vk::CommandPoolCreateInfo::default()
-                    .queue_family_index(queue_family)
-                    .flags(vk::CommandPoolCreateFlags::TRANSIENT),
-                None,
-            )?
-        };
+            let allocator = Allocator::new(&AllocatorCreateDesc {
+                instance: instance.clone(),
+                device: dev.clone(),
+                physical_device: physical,
+                debug_settings: Default::default(),
+                buffer_device_address: false,
+                allocation_sizes: Default::default(),
+            })
+            .map_err(|e| anyhow!("failed to create GPU allocator: {e}"))?;
 
-        Ok(Self {
-            _entry: entry,
-            instance,
-            debug,
-            surface_loader,
-            surface,
-            physical,
-            device,
-            swapchain_loader,
-            queue,
-            queue_family,
-            allocator: ManuallyDrop::new(allocator),
-            upload_pool,
-            max_anisotropy: anisotropy.then_some(props.limits.max_sampler_anisotropy.min(16.0)),
-        })
+            let upload_pool = unsafe {
+                dev.create_command_pool(
+                    &vk::CommandPoolCreateInfo::default()
+                        .queue_family_index(queue_family)
+                        .flags(vk::CommandPoolCreateFlags::TRANSIENT),
+                    None,
+                )?
+            };
+
+            Ok(Self {
+                _entry: entry.clone(),
+                instance: instance.clone(),
+                debug: debug.take(),
+                surface_loader: surface_loader.clone(),
+                surface,
+                physical,
+                device: dev,
+                swapchain_loader,
+                queue,
+                queue_family,
+                allocator: ManuallyDrop::new(allocator),
+                upload_pool,
+                max_anisotropy: anisotropy.then_some(props.limits.max_sampler_anisotropy.min(16.0)),
+            })
+        })();
+
+        if result.is_err() {
+            unsafe {
+                if let Some(dev) = device {
+                    dev.destroy_device(None);
+                }
+                if surface != vk::SurfaceKHR::null() {
+                    surface_loader.destroy_surface(surface, None);
+                }
+                if let Some((loader, messenger)) = debug {
+                    loader.destroy_debug_utils_messenger(messenger, None);
+                }
+                instance.destroy_instance(None);
+            }
+        }
+        result
     }
 
     pub fn wait_idle(&self) {
@@ -211,23 +233,26 @@ impl GpuContext {
                     .level(vk::CommandBufferLevel::PRIMARY)
                     .command_buffer_count(1),
             )?[0];
-            self.device.begin_command_buffer(
-                cmd,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-            record(cmd);
-            self.device.end_command_buffer(cmd)?;
-            let fence = self
-                .device
-                .create_fence(&vk::FenceCreateInfo::default(), None)?;
             let cmds = [cmd];
-            let submit = vk::SubmitInfo::default().command_buffers(&cmds);
-            let result = self
-                .device
-                .queue_submit(self.queue, &[submit], fence)
-                .and_then(|_| self.device.wait_for_fences(&[fence], true, u64::MAX));
-            self.device.destroy_fence(fence, None);
+            let result = (|| -> ash::prelude::VkResult<()> {
+                self.device.begin_command_buffer(
+                    cmd,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )?;
+                record(cmd);
+                self.device.end_command_buffer(cmd)?;
+                let fence = self
+                    .device
+                    .create_fence(&vk::FenceCreateInfo::default(), None)?;
+                let submit = vk::SubmitInfo::default().command_buffers(&cmds);
+                let result = self
+                    .device
+                    .queue_submit(self.queue, &[submit], fence)
+                    .and_then(|_| self.device.wait_for_fences(&[fence], true, u64::MAX));
+                self.device.destroy_fence(fence, None);
+                result
+            })();
             self.device.free_command_buffers(self.upload_pool, &cmds);
             result?;
         }

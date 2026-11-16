@@ -52,8 +52,17 @@ impl GameFs {
     }
 
     /// Turns a game-relative path into a real file system path.
+    /// Symlinks inside the game folder may not lead outside it.
     pub fn resolve(&self, path: &str) -> Result<PathBuf> {
-        Ok(self.root.join(Self::normalize(path)?))
+        let full = self.root.join(Self::normalize(path)?);
+        // Paths that don't exist can't be read through, so only existing
+        // ones need the check.
+        if let Ok(real) = dunce::canonicalize(&full) {
+            if !real.starts_with(&self.root) {
+                bail!("path '{path}' leads outside the game folder (symlink?)");
+            }
+        }
+        Ok(full)
     }
 
     pub fn read_string(&self, path: &str) -> Result<String> {
@@ -118,5 +127,28 @@ mod tests {
         assert!(GameFs::normalize("/etc/passwd").is_err());
         assert!(GameFs::normalize("C:/Windows").is_err());
         assert!(GameFs::normalize("").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_cannot_escape() {
+        let base = std::env::temp_dir().join(format!("basalt-vfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (game, outside) = (base.join("game"), base.join("outside"));
+        std::fs::create_dir_all(game.join("data")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "TOP SECRET").unwrap();
+        std::fs::write(game.join("data/ok.txt"), "fine").unwrap();
+        std::os::unix::fs::symlink(&outside, game.join("data/link")).unwrap();
+        std::os::unix::fs::symlink(game.join("data/ok.txt"), game.join("data/inside_link.txt"))
+            .unwrap();
+
+        let fs = GameFs::new(&game).unwrap();
+        assert!(fs.read_string("data/link/secret.txt").is_err());
+        assert!(fs.list_dir("data/link").is_err());
+        assert!(!fs.exists("data/link/secret.txt"));
+        // Symlinks that stay inside the folder are fine.
+        assert_eq!(fs.read_string("data/inside_link.txt").unwrap(), "fine");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -2,7 +2,7 @@
 
 use glam::Vec3;
 use mlua::prelude::*;
-use mlua::{LuaSerdeExt, SerializeOptions, Value, Variadic};
+use mlua::{LuaSerdeExt, Value, Variadic};
 
 use super::types::{shared, LuaEntity, LuaVec3};
 use crate::scene::{euler_deg_to_quat, Camera, Entity};
@@ -12,10 +12,39 @@ fn rt<E: std::fmt::Display>(e: E) -> LuaError {
     LuaError::runtime(e.to_string())
 }
 
-pub fn json_options() -> SerializeOptions {
-    SerializeOptions::new()
-        .serialize_none_to_null(false)
-        .serialize_unit_to_null(false)
+/// JSON -> Lua. `null` inside an array becomes `json.null` so the array
+/// keeps its length (a nil would leave a hole that stops `ipairs`/`#`);
+/// `null` as an object value or at the top level becomes nil, so
+/// `params.x or default` keeps working.
+pub fn json_to_lua(lua: &Lua, v: &serde_json::Value) -> LuaResult<Value> {
+    use serde_json::Value as J;
+    Ok(match v {
+        J::Null => Value::Nil,
+        J::Bool(b) => Value::Boolean(*b),
+        J::Number(n) => match n.as_i64() {
+            Some(i) => Value::Integer(i),
+            None => Value::Number(n.as_f64().unwrap_or(f64::NAN)),
+        },
+        J::String(s) => Value::String(lua.create_string(s)?),
+        J::Array(items) => {
+            let t = lua.create_table_with_capacity(items.len(), 0)?;
+            for (i, item) in items.iter().enumerate() {
+                let value = match item {
+                    J::Null => lua.null(),
+                    other => json_to_lua(lua, other)?,
+                };
+                t.raw_set(i + 1, value)?;
+            }
+            Value::Table(t)
+        }
+        J::Object(map) => {
+            let t = lua.create_table_with_capacity(0, map.len())?;
+            for (k, item) in map {
+                t.raw_set(k.as_str(), json_to_lua(lua, item)?)?;
+            }
+            Value::Table(t)
+        }
+    })
 }
 
 fn values_to_string(lua: &Lua, args: Variadic<Value>) -> LuaResult<String> {
@@ -97,7 +126,8 @@ pub fn install(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, ()| {
             let s = shared(lua);
             let w = s.world.borrow();
-            Ok(w.iter()
+            Ok(w.iter_spawn_order()
+                .into_iter()
                 .filter(|(_, e)| !e.pending_destroy)
                 .map(|(id, _)| LuaEntity(id))
                 .collect::<Vec<_>>())
@@ -106,13 +136,7 @@ pub fn install(lua: &Lua) -> LuaResult<()> {
     scene.set(
         "camera",
         lua.create_function(|lua, ()| {
-            let s = shared(lua);
-            let w = s.world.borrow();
-            let cam = w
-                .iter()
-                .find(|(_, e)| e.camera.is_some() && !e.pending_destroy)
-                .map(|(id, _)| LuaEntity(id));
-            Ok(cam)
+            Ok(shared(lua).world.borrow().active_camera_id().map(LuaEntity))
         })?,
     )?;
     scene.set("spawn", lua.create_function(spawn)?)?;
@@ -268,7 +292,7 @@ pub fn install(lua: &Lua) -> LuaResult<()> {
         "decode",
         lua.create_function(|lua, text: String| {
             let v: serde_json::Value = serde_json::from_str(&text).map_err(rt)?;
-            lua.to_value_with(&v, json_options())
+            json_to_lua(lua, &v)
         })?,
     )?;
     json.set(
@@ -282,6 +306,8 @@ pub fn install(lua: &Lua) -> LuaResult<()> {
             }
         })?,
     )?;
+    // Placeholder for null inside arrays; json.encode writes it as null.
+    json.set("null", lua.null())?;
     g.set("json", json)?;
 
     Ok(())

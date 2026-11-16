@@ -81,11 +81,9 @@ fn run() -> Result<()> {
 }
 
 fn main() -> ExitCode {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info,naga=warn,wgpu=warn"),
-    )
-    .format_timestamp(None)
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .init();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

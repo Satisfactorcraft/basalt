@@ -1,5 +1,6 @@
 //! Keyboard and mouse state, queried by name from scripts.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 use winit::event::MouseButton;
@@ -16,6 +17,8 @@ pub struct Input {
     mouse_position: (f64, f64),
     mouse_delta: (f64, f64),
     scroll: f32,
+    /// Unknown key/button names already warned about (warn once each).
+    warned: RefCell<HashSet<String>>,
 }
 
 impl Input {
@@ -80,22 +83,62 @@ impl Input {
     }
 
     pub fn key_down(&self, name: &str) -> bool {
+        self.check_key(name);
         any_alias(&self.keys_down, name)
     }
     pub fn key_pressed(&self, name: &str) -> bool {
+        self.check_key(name);
         any_alias(&self.keys_pressed, name)
     }
     pub fn key_released(&self, name: &str) -> bool {
+        self.check_key(name);
         any_alias(&self.keys_released, name)
     }
     pub fn mouse_down(&self, name: &str) -> bool {
+        self.check_button(name);
         self.mouse_down.contains(name)
     }
     pub fn mouse_pressed(&self, name: &str) -> bool {
+        self.check_button(name);
         self.mouse_pressed.contains(name)
     }
     pub fn mouse_released(&self, name: &str) -> bool {
+        self.check_button(name);
         self.mouse_released.contains(name)
+    }
+
+    /// A typo'd name would silently stay false forever; say so once.
+    /// Returns whether the name was unknown (for tests).
+    fn check_key(&self, name: &str) -> bool {
+        if is_key_name(name) {
+            return false;
+        }
+        let hint = if is_key_name(&name.to_ascii_lowercase()) {
+            format!(" (did you mean \"{}\"?)", name.to_ascii_lowercase())
+        } else {
+            String::new()
+        };
+        self.warn_once(&format!(
+            "unknown key name \"{name}\"{hint}; it will never be pressed"
+        ));
+        true
+    }
+
+    fn check_button(&self, name: &str) -> bool {
+        if MOUSE_BUTTONS.contains(&name) {
+            return false;
+        }
+        self.warn_once(&format!(
+            "unknown mouse button \"{name}\" (valid: {}); it will never be pressed",
+            MOUSE_BUTTONS.join(", ")
+        ));
+        true
+    }
+
+    fn warn_once(&self, msg: &str) {
+        if self.warned.borrow_mut().insert(msg.to_string()) {
+            log::warn!(target: "lua", "{msg}");
+        }
     }
     pub fn mouse_position(&self) -> (f64, f64) {
         self.mouse_position
@@ -120,30 +163,42 @@ fn any_alias(set: &HashSet<&'static str>, name: &str) -> bool {
 
 #[rustfmt::skip]
 /// Physical key names (layout independent, "w" is the key where W is on QWERTY).
-pub fn key_name(code: KeyCode) -> Option<&'static str> {
+const KEYS: &[(KeyCode, &str)] = {
     use KeyCode::*;
-    Some(match code {
-        KeyA => "a", KeyB => "b", KeyC => "c", KeyD => "d", KeyE => "e", KeyF => "f",
-        KeyG => "g", KeyH => "h", KeyI => "i", KeyJ => "j", KeyK => "k", KeyL => "l",
-        KeyM => "m", KeyN => "n", KeyO => "o", KeyP => "p", KeyQ => "q", KeyR => "r",
-        KeyS => "s", KeyT => "t", KeyU => "u", KeyV => "v", KeyW => "w", KeyX => "x",
-        KeyY => "y", KeyZ => "z",
-        Digit0 => "0", Digit1 => "1", Digit2 => "2", Digit3 => "3", Digit4 => "4",
-        Digit5 => "5", Digit6 => "6", Digit7 => "7", Digit8 => "8", Digit9 => "9",
-        F1 => "f1", F2 => "f2", F3 => "f3", F4 => "f4", F5 => "f5", F6 => "f6",
-        F7 => "f7", F8 => "f8", F9 => "f9", F10 => "f10", F11 => "f11", F12 => "f12",
-        Space => "space", Enter => "enter", Escape => "escape", Tab => "tab",
-        Backspace => "backspace", Delete => "delete", Insert => "insert",
-        Home => "home", End => "end", PageUp => "pageup", PageDown => "pagedown",
-        ArrowLeft => "left", ArrowRight => "right", ArrowUp => "up", ArrowDown => "down",
-        ShiftLeft => "lshift", ShiftRight => "rshift",
-        ControlLeft => "lctrl", ControlRight => "rctrl",
-        AltLeft => "lalt", AltRight => "ralt",
-        Minus => "-", Equal => "=", BracketLeft => "[", BracketRight => "]",
-        Semicolon => ";", Quote => "'", Comma => ",", Period => ".", Slash => "/",
-        Backslash => "\\", Backquote => "`",
-        _ => return None,
-    })
+    &[
+        (KeyA, "a"), (KeyB, "b"), (KeyC, "c"), (KeyD, "d"), (KeyE, "e"), (KeyF, "f"),
+        (KeyG, "g"), (KeyH, "h"), (KeyI, "i"), (KeyJ, "j"), (KeyK, "k"), (KeyL, "l"),
+        (KeyM, "m"), (KeyN, "n"), (KeyO, "o"), (KeyP, "p"), (KeyQ, "q"), (KeyR, "r"),
+        (KeyS, "s"), (KeyT, "t"), (KeyU, "u"), (KeyV, "v"), (KeyW, "w"), (KeyX, "x"),
+        (KeyY, "y"), (KeyZ, "z"),
+        (Digit0, "0"), (Digit1, "1"), (Digit2, "2"), (Digit3, "3"), (Digit4, "4"),
+        (Digit5, "5"), (Digit6, "6"), (Digit7, "7"), (Digit8, "8"), (Digit9, "9"),
+        (F1, "f1"), (F2, "f2"), (F3, "f3"), (F4, "f4"), (F5, "f5"), (F6, "f6"),
+        (F7, "f7"), (F8, "f8"), (F9, "f9"), (F10, "f10"), (F11, "f11"), (F12, "f12"),
+        (Space, "space"), (Enter, "enter"), (Escape, "escape"), (Tab, "tab"),
+        (Backspace, "backspace"), (Delete, "delete"), (Insert, "insert"),
+        (Home, "home"), (End, "end"), (PageUp, "pageup"), (PageDown, "pagedown"),
+        (ArrowLeft, "left"), (ArrowRight, "right"), (ArrowUp, "up"), (ArrowDown, "down"),
+        (ShiftLeft, "lshift"), (ShiftRight, "rshift"),
+        (ControlLeft, "lctrl"), (ControlRight, "rctrl"),
+        (AltLeft, "lalt"), (AltRight, "ralt"),
+        (Minus, "-"), (Equal, "="), (BracketLeft, "["), (BracketRight, "]"),
+        (Semicolon, ";"), (Quote, "'"), (Comma, ","), (Period, "."), (Slash, "/"),
+        (Backslash, "\\"), (Backquote, "`"),
+    ]
+};
+
+/// Names that match either side of a modifier.
+const KEY_ALIASES: &[&str] = &["shift", "ctrl", "alt"];
+
+const MOUSE_BUTTONS: &[&str] = &["left", "right", "middle", "back", "forward"];
+
+pub fn key_name(code: KeyCode) -> Option<&'static str> {
+    KEYS.iter().find(|(c, _)| *c == code).map(|(_, n)| *n)
+}
+
+fn is_key_name(name: &str) -> bool {
+    KEY_ALIASES.contains(&name) || KEYS.iter().any(|(_, n)| *n == name)
 }
 
 #[cfg(test)]
@@ -161,5 +216,24 @@ mod tests {
         input.end_frame();
         input.on_key(KeyCode::Tab, true, false, false);
         assert!(input.key_pressed("tab"));
+    }
+
+    #[test]
+    fn unknown_names_are_flagged_once() {
+        let input = Input::default();
+        for good in ["space", "shift", "lshift", "f12", "\\", "a"] {
+            assert!(!input.check_key(good), "{good}");
+        }
+        assert!(input.check_key("Space"));
+        assert!(input.check_key("spcae"));
+        assert!(input.check_button("lmb"));
+        assert!(!input.check_button("back"));
+        assert!(!input.key_down("Space"));
+        input.key_down("Space");
+        assert_eq!(input.warned.borrow().len(), 3, "each bad name warns once");
+        // Every table entry round-trips through key_name.
+        for (code, name) in KEYS {
+            assert_eq!(key_name(*code), Some(*name));
+        }
     }
 }

@@ -26,6 +26,72 @@ pub struct Primitive {
     pub transform: Mat4,
 }
 
+/// glTF sampler settings, as Vulkan values. Used as a cache key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SamplerKey {
+    pub wrap_u: vk::SamplerAddressMode,
+    pub wrap_v: vk::SamplerAddressMode,
+    pub mag: vk::Filter,
+    pub min: vk::Filter,
+    pub mipmap: vk::SamplerMipmapMode,
+    /// false for min filters without mipmapping (NEAREST / LINEAR).
+    pub use_mips: bool,
+}
+
+impl Default for SamplerKey {
+    fn default() -> Self {
+        Self {
+            wrap_u: vk::SamplerAddressMode::REPEAT,
+            wrap_v: vk::SamplerAddressMode::REPEAT,
+            mag: vk::Filter::LINEAR,
+            min: vk::Filter::LINEAR,
+            mipmap: vk::SamplerMipmapMode::LINEAR,
+            use_mips: true,
+        }
+    }
+}
+
+impl SamplerKey {
+    fn from_gltf(s: &gltf::texture::Sampler) -> Self {
+        use gltf::texture::{MagFilter, MinFilter, WrappingMode};
+        let wrap = |w| match w {
+            WrappingMode::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+            WrappingMode::MirroredRepeat => vk::SamplerAddressMode::MIRRORED_REPEAT,
+            WrappingMode::Repeat => vk::SamplerAddressMode::REPEAT,
+        };
+        let mag = match s.mag_filter() {
+            Some(MagFilter::Nearest) => vk::Filter::NEAREST,
+            _ => vk::Filter::LINEAR,
+        };
+        let (min, mipmap, use_mips) = match s.min_filter() {
+            Some(MinFilter::Nearest) => {
+                (vk::Filter::NEAREST, vk::SamplerMipmapMode::NEAREST, false)
+            }
+            Some(MinFilter::Linear) => (vk::Filter::LINEAR, vk::SamplerMipmapMode::NEAREST, false),
+            Some(MinFilter::NearestMipmapNearest) => {
+                (vk::Filter::NEAREST, vk::SamplerMipmapMode::NEAREST, true)
+            }
+            Some(MinFilter::LinearMipmapNearest) => {
+                (vk::Filter::LINEAR, vk::SamplerMipmapMode::NEAREST, true)
+            }
+            Some(MinFilter::NearestMipmapLinear) => {
+                (vk::Filter::NEAREST, vk::SamplerMipmapMode::LINEAR, true)
+            }
+            Some(MinFilter::LinearMipmapLinear) | None => {
+                (vk::Filter::LINEAR, vk::SamplerMipmapMode::LINEAR, true)
+            }
+        };
+        Self {
+            wrap_u: wrap(s.wrap_s()),
+            wrap_v: wrap(s.wrap_t()),
+            mag,
+            min,
+            mipmap,
+            use_mips,
+        }
+    }
+}
+
 pub struct CpuMaterial {
     pub base_color: Vec4,
     /// Fragments with alpha below this are discarded. Negative = opaque
@@ -35,6 +101,9 @@ pub struct CpuMaterial {
     pub double_sided: bool,
     /// Index into `CpuModel::images`.
     pub image: Option<usize>,
+    /// Which TEXCOORD_n set the base color texture uses.
+    pub tex_coord: u32,
+    pub sampler: SamplerKey,
 }
 
 pub struct CpuModel {
@@ -47,6 +116,8 @@ pub struct CpuModel {
 
 pub struct GpuMaterial {
     pub set: vk::DescriptorSet,
+    /// The pool `set` came from (material pools grow on demand).
+    pub pool: vk::DescriptorPool,
     pub base_color: Vec4,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
@@ -61,11 +132,10 @@ pub struct GpuModel {
 }
 
 impl GpuModel {
-    pub fn destroy(self, ctx: &mut GpuContext, pool: vk::DescriptorPool) {
-        let sets: Vec<vk::DescriptorSet> = self.materials.iter().map(|m| m.set).collect();
-        if !sets.is_empty() {
+    pub fn destroy(self, ctx: &mut GpuContext) {
+        for m in &self.materials {
             unsafe {
-                let _ = ctx.device.free_descriptor_sets(pool, &sets);
+                let _ = ctx.device.free_descriptor_sets(m.pool, &[m.set]);
             }
         }
         ctx.destroy_buffer(self.vertex_buffer);
@@ -92,6 +162,12 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
     let mut image_map: Vec<Option<usize>> = vec![None; images.len()];
     for mat in doc.materials() {
         let pbr = mat.pbr_metallic_roughness();
+        let tex_coord = pbr.base_color_texture().map_or(0, |info| info.tex_coord());
+        let sampler = pbr
+            .base_color_texture()
+            .map_or_else(SamplerKey::default, |info| {
+                SamplerKey::from_gltf(&info.texture().sampler())
+            });
         let image = pbr
             .base_color_texture()
             .map(|info| info.texture().source().index());
@@ -124,6 +200,8 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
             alpha_cutoff,
             double_sided: mat.double_sided(),
             image,
+            tex_coord,
+            sampler,
         });
     }
     let default_material = model.materials.len();
@@ -132,6 +210,8 @@ pub fn load_gltf(path: &Path) -> Result<CpuModel> {
         alpha_cutoff: -1.0,
         double_sided: false,
         image: None,
+        tex_coord: 0,
+        sampler: SamplerKey::default(),
     });
 
     let scene = doc.default_scene().or_else(|| doc.scenes().next());
@@ -175,8 +255,18 @@ fn visit_node(
             };
             let positions: Vec<[f32; 3]> = positions.collect();
             let normals: Option<Vec<[f32; 3]>> = reader.read_normals().map(|n| n.collect());
-            let uvs: Option<Vec<[f32; 2]>> =
-                reader.read_tex_coords(0).map(|t| t.into_f32().collect());
+            // UVs from the set the material's base color texture asks for.
+            let material = prim.material().index().unwrap_or(default_material);
+            let set = model.materials.get(material).map_or(0, |m| m.tex_coord);
+            let mut uvs: Option<Vec<[f32; 2]>> =
+                reader.read_tex_coords(set).map(|t| t.into_f32().collect());
+            if uvs.is_none() && set != 0 {
+                warn!(
+                    "{}: material wants TEXCOORD_{set}, which the mesh doesn't have; using TEXCOORD_0",
+                    path.display()
+                );
+                uvs = reader.read_tex_coords(0).map(|t| t.into_f32().collect());
+            }
             let indices: Vec<u32> = match reader.read_indices() {
                 Some(i) => i.into_u32().collect(),
                 None => (0..positions.len() as u32).collect(),
@@ -206,7 +296,7 @@ fn visit_node(
             model.primitives.push(Primitive {
                 first_index,
                 index_count: indices.len() as u32,
-                material: prim.material().index().unwrap_or(default_material),
+                material,
                 transform,
             });
         }
@@ -246,9 +336,10 @@ fn to_rgba8(img: &gltf::image::Data) -> Result<Image2d> {
             .chunks_exact(3)
             .flat_map(|c| [c[0], c[1], c[2], 255])
             .collect(),
+        // Two channels = luminance + alpha (gray PNGs with transparency).
         Format::R8G8 => px
             .chunks_exact(2)
-            .flat_map(|c| [c[0], c[1], 0, 255])
+            .flat_map(|c| [c[0], c[0], c[0], c[1]])
             .collect(),
         Format::R8 => px.iter().flat_map(|&v| [v, v, v, 255]).collect(),
         // 16-bit: keep the high byte (little endian).
@@ -259,6 +350,14 @@ fn to_rgba8(img: &gltf::image::Data) -> Result<Image2d> {
         Format::R16G16B16 => px
             .chunks_exact(6)
             .flat_map(|c| [c[1], c[3], c[5], 255])
+            .collect(),
+        Format::R16G16 => px
+            .chunks_exact(4)
+            .flat_map(|c| [c[1], c[1], c[1], c[3]])
+            .collect(),
+        Format::R16 => px
+            .chunks_exact(2)
+            .flat_map(|c| [c[1], c[1], c[1], 255])
             .collect(),
         other => bail!("unsupported image format {other:?}"),
     };
@@ -292,5 +391,66 @@ mod tests {
         let crate_model = super::load_gltf(&fs.resolve("models/crate.gltf").unwrap()).unwrap();
         assert_eq!(crate_model.images.len(), 1, "crate texture should load");
         assert!(crate_model.materials[0].image.is_some());
+    }
+
+    #[test]
+    fn gray_textures_expand_to_rgba() {
+        let img = |format, pixels: Vec<u8>| gltf::image::Data {
+            pixels,
+            format,
+            width: 1,
+            height: 1,
+        };
+        use gltf::image::Format;
+        let cases = [
+            (img(Format::R8G8, vec![200, 100]), [200, 200, 200, 100]),
+            (img(Format::R8, vec![50]), [50, 50, 50, 255]),
+            // 16-bit, little endian: high byte wins.
+            (
+                img(Format::R16G16, vec![0, 200, 0, 100]),
+                [200, 200, 200, 100],
+            ),
+            (img(Format::R16, vec![0, 50]), [50, 50, 50, 255]),
+        ];
+        for (data, want) in cases {
+            assert_eq!(
+                super::to_rgba8(&data).unwrap().rgba,
+                want,
+                "{:?}",
+                data.format
+            );
+        }
+    }
+
+    #[test]
+    fn base_color_uses_its_texcoord_set() {
+        let dir = std::env::temp_dir().join(format!("basalt-uv1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("game/models");
+        std::fs::copy(src.join("crate.bin"), dir.join("crate.bin")).unwrap();
+        let mut gltf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(src.join("crate.gltf")).unwrap())
+                .unwrap();
+        // TEXCOORD_1 = the normal floats read as VEC2: values differ from set 0.
+        gltf["accessors"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(
+                {"bufferView": 1, "componentType": 5126, "count": 24, "type": "VEC2"}
+            ));
+        gltf["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"] = 4.into();
+        std::fs::copy(src.join("../textures/crate.png"), dir.join("crate.png")).unwrap();
+        gltf["images"][0]["uri"] = "crate.png".into();
+        gltf["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["texCoord"] = 1.into();
+        std::fs::write(dir.join("m.gltf"), gltf.to_string()).unwrap();
+        let result = super::load_gltf(&dir.join("m.gltf"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let model = match result {
+            Ok(m) => m,
+            Err(e) => panic!("{e:#}"),
+        };
+        // Set 0 starts with (0, 1); the first normal is (1, 0, 0) -> (1, 0).
+        assert_eq!(model.vertices[0].uv, [1.0, 0.0]);
     }
 }

@@ -179,15 +179,21 @@ fn with<R>(lua: &Lua, id: EntityId, f: impl FnOnce(&mut Entity) -> LuaResult<R>)
 
 fn look_rotation(dir: Vec3, up: Vec3) -> Option<Quat> {
     let dir = dir.try_normalize()?;
-    let up = if dir.cross(up).length_squared() < 1e-6 {
-        Vec3::Z
-    } else {
-        up
-    };
+    // `up` must not be zero or parallel to `dir`; otherwise fall back to the
+    // world axis least aligned with `dir` (which can never be parallel).
+    let up = up
+        .try_normalize()
+        .filter(|u| dir.cross(*u).length_squared() > 1e-6)
+        .unwrap_or_else(|| {
+            [Vec3::Y, Vec3::Z, Vec3::X]
+                .into_iter()
+                .min_by(|a, b| dir.dot(*a).abs().total_cmp(&dir.dot(*b).abs()))
+                .unwrap_or(Vec3::Y)
+        });
     let (_, rot, _) = Mat4::look_to_rh(Vec3::ZERO, dir, up)
         .inverse()
         .to_scale_rotation_translation();
-    Some(rot)
+    rot.is_finite().then_some(rot)
 }
 
 impl UserData for LuaEntity {
@@ -369,5 +375,34 @@ impl UserData for LuaEntity {
                 None => "Entity(<destroyed>)".to_string(),
             })
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::Vec3;
+
+    #[test]
+    fn look_rotation_never_nan() {
+        let dirs = [
+            Vec3::X,
+            Vec3::Y,
+            Vec3::Z,
+            -Vec3::Y,
+            Vec3::new(1.0, 2.0, 3.0),
+        ];
+        let ups = [Vec3::Y, Vec3::Z, Vec3::X, -Vec3::Y, Vec3::ZERO];
+        for dir in dirs {
+            for up in ups {
+                let q = super::look_rotation(dir, up).expect("rotation");
+                assert!(q.is_finite(), "dir {dir} up {up}");
+                let forward = q * Vec3::NEG_Z;
+                assert!(
+                    forward.abs_diff_eq(dir.normalize(), 1e-4),
+                    "dir {dir} up {up} -> {forward}"
+                );
+            }
+        }
+        assert!(super::look_rotation(Vec3::ZERO, Vec3::Y).is_none());
     }
 }

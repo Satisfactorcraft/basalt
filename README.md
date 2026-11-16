@@ -43,7 +43,7 @@ Override with `BASALT_VALIDATION=1` / `0`. More logging: `RUST_LOG=debug`.
 
 ```
 game/
-  game.json            required: title, window, start level
+  game.json            required file (every field in it is optional)
   levels/*.json        scenes: entities + lighting
   models/*.gltf|.glb   glTF 2.0 (+ .bin buffers)
   textures/*.png|.jpg  referenced by the models
@@ -62,7 +62,8 @@ the game folder and can't escape it (`../` out of the folder is an error).
   "start_level": "levels/main.json",
   "window": { "width": 1280, "height": 720, "vsync": true, "resizable": true, "fullscreen": false },
   "hot_reload": true,
-  "dev_mode": false
+  "dev_mode": false,
+  "script_timeout_ms": 1000
 }
 ```
 
@@ -95,7 +96,8 @@ Entity fields: `name`, `model`, `position`, `rotation` (Euler degrees
 `script`, `params` (any JSON, handed to the script as `self.params`).
 Unknown fields are an error, so typos don't fail silently.
 
-The first entity with a `camera` is the active camera. Coordinates are
+The first entity with a `camera` (in level-file order, then runtime spawns) is
+the active camera; this stays the same across level reloads. Coordinates are
 right-handed, Y up, -Z forward (same as glTF).
 
 ### Scripts
@@ -127,6 +129,11 @@ Instance fields: `self.entity`, `self.params`, `self.name`.
 
 If `on_start` errors or destroys its own entity, `on_update` doesn't run.
 
+A single script call (a hook, or a script file's top-level code) that runs
+longer than `script_timeout_ms` (default 1000; `0` = no limit) is stopped with
+an error and that script pauses, so an accidental infinite loop can't freeze
+the game or block hot reload.
+
 ### Lua API
 
 | | |
@@ -134,17 +141,18 @@ If `on_start` errors or destroys its own entity, `on_update` doesn't run.
 | **vec3** | `vec3(x, y, z)`, `vec3(s)`; fields `x y z`; `+ - * /` with vec3 or numbers; `:length() :normalized() :dot(v) :cross(v) :distance(v) :lerp(v, t) :copy() :unpack()` |
 | **entity** | fields `name position rotation scale model visible` (read/write), `id`, `script_path`; methods `:valid() :destroy() :translate(v) :translate_local(v) :rotate(axis, deg) :rotate_local(axis, deg) :rotate_x/y/z(deg) :look_at(target, up?) :forward() :right() :up() :script()` |
 | **scene** | `find(name) all() camera() spawn{...} load_level(path) reload_level() level() set_clear_color(r,g,b,a?) set_sun(dir, color?) set_ambient(color)` |
-| **input** | `key_down/pressed/released(name) mouse_down/pressed/released("left"\|"right"\|"middle") mouse_position() mouse_delta() scroll() lock_cursor(bool) cursor_locked()`. The lock applies at the end of the frame; `cursor_locked()` reports whether it actually took effect. |
+| **input** | `key_down/pressed/released(name) mouse_down/pressed/released("left"\|"right"\|"middle"\|"back"\|"forward") mouse_position() mouse_delta() scroll() lock_cursor(bool) cursor_locked()`. The lock applies at the end of the frame; `cursor_locked()` reports whether it actually took effect. |
 | **time** | `time.dt time.elapsed time.frame` |
 | **game** | `quit() read_file(path) file_exists(path) list_dir(path) window_size() set_title(s)` |
-| **json** | `decode(text) encode(value, pretty?)` |
+| **json** | `decode(text) encode(value, pretty?)`, `json.null`: a `null` inside a JSON array decodes to `json.null` (so arrays keep their length); a `null` object value decodes to `nil` |
 | **log** | `info/warn/error/debug(...)`; `print` goes to `log.info` |
 
 Key names: `a`–`z`, `0`–`9`, `f1`–`f12`, `space enter escape tab backspace
 delete insert home end pageup pagedown left right up down`, `shift ctrl alt`
 (either side) or `lshift rshift lctrl rctrl lalt ralt`, plus punctuation
 (`-`, `=`, `[`, `]`, `;`, `'`, `,`, `.`, `/`, `\`). They're physical keys, so
-`w` is the same spot on AZERTY.
+`w` is the same spot on AZERTY. An unknown key or button name (e.g. `"Space"`) logs a
+warning once and always reads as not pressed.
 
 Positions/rotations are returned as copies: `local p = e.position; p.y = 2;
 e.position = p`. `scene.spawn` takes the same fields as a level entity
@@ -163,7 +171,7 @@ game folders you trust.
 
 | You save... | What happens |
 |---|---|
-| a `.lua` file | every script recompiles and is swapped under live entities (state kept, `on_reload` called). Syntax error: the old version keeps running. Runtime error: that script pauses until you fix it. |
+| a `.lua` file | every script recompiles and is swapped under live entities (state kept, `on_reload` called). Syntax error: the old version keeps running. Runtime error: that script pauses, and retries the next time any game file is saved (so fixing a data file it reads also un-pauses it). |
 | the current level `.json` | level reloads. Broken JSON: the current level stays. |
 | a model / texture | GPU caches flush and models reload |
 | `game.json` | needs a restart (logged) |

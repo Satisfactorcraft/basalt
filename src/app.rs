@@ -28,6 +28,9 @@ pub fn run(fs: GameFs, config: GameConfig) -> Result<()> {
         fs.clone(),
         (config.window.width, config.window.height),
     ));
+    shared.script_timeout.set(
+        (config.script_timeout_ms > 0).then(|| Duration::from_millis(config.script_timeout_ms)),
+    );
     let scripts = ScriptHost::new(shared.clone())?;
     let watcher = if config.hot_reload {
         match Watcher::new(&fs) {
@@ -81,6 +84,9 @@ struct App {
     next_background_tick: Instant,
     fatal: Option<anyhow::Error>,
 }
+
+/// Touchpads report scrolling in pixels; scripts get "lines" like a wheel.
+const PIXELS_PER_SCROLL_LINE: f32 = 40.0;
 
 /// Script update rate while the window is minimized.
 const BACKGROUND_TICK: Duration = Duration::from_millis(33);
@@ -168,12 +174,14 @@ impl App {
         let Some(watcher) = self.watcher.as_mut() else {
             return;
         };
-        let changed = watcher.poll(&self.fs);
-        if changed.is_empty() {
+        let changes = watcher.poll(&self.fs);
+        if changes.is_empty() {
             return;
         }
+        let changed = changes.paths;
         let current_level = self.shared.world.borrow().level_path.clone();
-        let (mut scripts, mut level, mut assets) = (false, false, false);
+        // A rescan means events were lost: reload everything to be safe.
+        let (mut scripts, mut level, mut assets) = (changes.rescan, changes.rescan, changes.rescan);
         for path in &changed {
             info!("changed: {path}");
             if path.ends_with(".lua") {
@@ -277,13 +285,9 @@ impl ApplicationHandler for App {
             } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     let pressed = event.state == ElementState::Pressed;
-                    self.shared.input.borrow_mut().on_key(
-                        code,
-                        pressed,
-                        event.repeat,
-                        is_synthetic,
-                    );
-                    // Alt+Enter toggles fullscreen.
+                    // Alt+Enter toggles fullscreen. The Enter press is the
+                    // engine's, so scripts don't also see key_pressed("enter")
+                    // (its release is a no-op since it never counted as held).
                     if pressed
                         && !is_synthetic
                         && !event.repeat
@@ -297,7 +301,14 @@ impl ApplicationHandler for App {
                                 .then_some(Fullscreen::Borderless(None));
                             w.set_fullscreen(fs);
                         }
+                        return;
                     }
+                    self.shared.input.borrow_mut().on_key(
+                        code,
+                        pressed,
+                        event.repeat,
+                        is_synthetic,
+                    );
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -315,7 +326,7 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let amount = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / PIXELS_PER_SCROLL_LINE,
                 };
                 self.shared.input.borrow_mut().on_scroll(amount);
             }

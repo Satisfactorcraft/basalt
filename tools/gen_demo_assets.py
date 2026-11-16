@@ -41,8 +41,11 @@ def checker(x, y):
     return (v, v, v + 8, 255)
 
 
+CRATE_SIZE = 128
+
+
 def crate(x, y):
-    size = 128
+    size = CRATE_SIZE
     border = x < 10 or y < 10 or x >= size - 10 or y >= size - 10
     diagonal = abs(x - y) < 7 or abs(x - (size - 1 - y)) < 7
     grain = int(12 * math.sin(y * 0.35 + math.sin(x * 0.05) * 3))
@@ -132,7 +135,7 @@ def main():
     os.makedirs(os.path.join(ROOT, "models"), exist_ok=True)
     os.makedirs(os.path.join(ROOT, "textures"), exist_ok=True)
     write_png(os.path.join(ROOT, "textures", "checker.png"), 256, 256, checker)
-    write_png(os.path.join(ROOT, "textures", "crate.png"), 128, 128, crate)
+    write_png(os.path.join(ROOT, "textures", "crate.png"), CRATE_SIZE, CRATE_SIZE, crate)
 
     cube_faces = [
         ((1, 0, 0), (0, 0, -1), (0, 1, 0)),
@@ -157,6 +160,9 @@ def main():
         for k in range(4):
             a, b = ring[k], ring[(k + 1) % 4]
             tri = [a, b, tip] if tip[1] > 0 else [b, a, tip]
+            # Scale first: a non-uniform scale changes face orientation, so
+            # the normal must come from the final triangle.
+            tri = [(p[0] * 0.5, p[1] * 0.8, p[2] * 0.5) for p in tri]
             e1 = tuple(tri[1][i] - tri[0][i] for i in range(3))
             e2 = tuple(tri[2][i] - tri[0][i] for i in range(3))
             n = cross(e1, e2)
@@ -164,7 +170,7 @@ def main():
             n = tuple(c / ln for c in n)
             for p in tri:
                 I.append(len(P))
-                P.append((p[0] * 0.5, p[1] * 0.8, p[2] * 0.5))
+                P.append(p)
                 N.append(n)
                 T.append((0.0, 0.0))
     write_gltf("gem", P, N, T, I, {
