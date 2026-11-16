@@ -246,9 +246,10 @@ fn to_rgba8(img: &gltf::image::Data) -> Result<Image2d> {
             .chunks_exact(3)
             .flat_map(|c| [c[0], c[1], c[2], 255])
             .collect(),
+        // Two channels = luminance + alpha (gray PNGs with transparency).
         Format::R8G8 => px
             .chunks_exact(2)
-            .flat_map(|c| [c[0], c[1], 0, 255])
+            .flat_map(|c| [c[0], c[0], c[0], c[1]])
             .collect(),
         Format::R8 => px.iter().flat_map(|&v| [v, v, v, 255]).collect(),
         // 16-bit: keep the high byte (little endian).
@@ -259,6 +260,14 @@ fn to_rgba8(img: &gltf::image::Data) -> Result<Image2d> {
         Format::R16G16B16 => px
             .chunks_exact(6)
             .flat_map(|c| [c[1], c[3], c[5], 255])
+            .collect(),
+        Format::R16G16 => px
+            .chunks_exact(4)
+            .flat_map(|c| [c[1], c[1], c[1], c[3]])
+            .collect(),
+        Format::R16 => px
+            .chunks_exact(2)
+            .flat_map(|c| [c[1], c[1], c[1], 255])
             .collect(),
         other => bail!("unsupported image format {other:?}"),
     };
@@ -292,5 +301,34 @@ mod tests {
         let crate_model = super::load_gltf(&fs.resolve("models/crate.gltf").unwrap()).unwrap();
         assert_eq!(crate_model.images.len(), 1, "crate texture should load");
         assert!(crate_model.materials[0].image.is_some());
+    }
+
+    #[test]
+    fn gray_textures_expand_to_rgba() {
+        let img = |format, pixels: Vec<u8>| gltf::image::Data {
+            pixels,
+            format,
+            width: 1,
+            height: 1,
+        };
+        use gltf::image::Format;
+        let cases = [
+            (img(Format::R8G8, vec![200, 100]), [200, 200, 200, 100]),
+            (img(Format::R8, vec![50]), [50, 50, 50, 255]),
+            // 16-bit, little endian: high byte wins.
+            (
+                img(Format::R16G16, vec![0, 200, 0, 100]),
+                [200, 200, 200, 100],
+            ),
+            (img(Format::R16, vec![0, 50]), [50, 50, 50, 255]),
+        ];
+        for (data, want) in cases {
+            assert_eq!(
+                super::to_rgba8(&data).unwrap().rgba,
+                want,
+                "{:?}",
+                data.format
+            );
+        }
     }
 }
