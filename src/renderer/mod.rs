@@ -25,7 +25,8 @@ use resources::{image_barrier, Buffer, Image2d, Texture};
 use swapchain::Swapchain;
 
 const FRAMES_IN_FLIGHT: usize = 2;
-const MAX_MATERIALS: u32 = 4096;
+/// Material descriptor sets per pool; more pools are created as needed.
+const MATERIALS_PER_POOL: u32 = 1024;
 
 static VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mesh.vert.spv"));
 static FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mesh.frag.spv"));
@@ -75,7 +76,10 @@ pub struct Renderer {
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     pipeline_formats: (vk::Format, vk::Format),
+    /// Per-frame uniform sets.
     descriptor_pool: vk::DescriptorPool,
+    /// Material sets: a new pool is added whenever the others are full.
+    material_pools: Vec<vk::DescriptorPool>,
     command_pool: vk::CommandPool,
     /// One sampler per distinct glTF sampler setting.
     samplers: HashMap<SamplerKey, vk::Sampler>,
@@ -108,6 +112,7 @@ impl Renderer {
             pipeline: vk::Pipeline::null(),
             pipeline_formats: (vk::Format::UNDEFINED, vk::Format::UNDEFINED),
             descriptor_pool: vk::DescriptorPool::null(),
+            material_pools: Vec::new(),
             command_pool: vk::CommandPool::null(),
             samplers: HashMap::new(),
             white: None,
@@ -153,20 +158,13 @@ impl Renderer {
                 None,
             )?;
 
-            let pool_sizes = [
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    descriptor_count: FRAMES_IN_FLIGHT as u32,
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                    descriptor_count: MAX_MATERIALS,
-                },
-            ];
+            let pool_sizes = [vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: FRAMES_IN_FLIGHT as u32,
+            }];
             self.descriptor_pool = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
-                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-                    .max_sets(MAX_MATERIALS + FRAMES_IN_FLIGHT as u32)
+                    .max_sets(FRAMES_IN_FLIGHT as u32)
                     .pool_sizes(&pool_sizes),
                 None,
             )?;
@@ -424,15 +422,56 @@ impl Renderer {
         Ok(sampler)
     }
 
+    /// Allocates a material descriptor set, adding a pool when all are full.
+    fn allocate_material_set(&mut self) -> Result<(vk::DescriptorSet, vk::DescriptorPool)> {
+        let layouts = [self.material_layout];
+        // Newest pool first: older ones are usually full.
+        for &pool in self.material_pools.iter().rev() {
+            let result = unsafe {
+                self.ctx.device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(pool)
+                        .set_layouts(&layouts),
+                )
+            };
+            match result {
+                Ok(sets) => return Ok((sets[0], pool)),
+                Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY | vk::Result::ERROR_FRAGMENTED_POOL) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: MATERIALS_PER_POOL,
+        }];
+        let pool = unsafe {
+            self.ctx.device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+                    .max_sets(MATERIALS_PER_POOL)
+                    .pool_sizes(&sizes),
+                None,
+            )?
+        };
+        self.material_pools.push(pool);
+        let sets = unsafe {
+            self.ctx.device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(pool)
+                    .set_layouts(&layouts),
+            )?
+        };
+        Ok((sets[0], pool))
+    }
+
     // -- models -----------------------------------------------------------------
 
     /// Drops every cached model; they reload from disk on next use.
     pub fn invalidate_models(&mut self) {
         self.ctx.wait_idle();
-        let pool = self.descriptor_pool;
         for (_, slot) in self.models.drain() {
             if let Some(m) = slot {
-                m.destroy(&mut self.ctx, pool);
+                m.destroy(&mut self.ctx);
             }
         }
     }
@@ -495,15 +534,8 @@ impl Renderer {
                     Some(i) => model.textures[i].view,
                     None => self.white.as_ref().unwrap().view,
                 };
-                let set = unsafe {
-                    let layouts = [self.material_layout];
-                    self.ctx.device.allocate_descriptor_sets(
-                        &vk::DescriptorSetAllocateInfo::default()
-                            .descriptor_pool(self.descriptor_pool)
-                            .set_layouts(&layouts),
-                    )?[0]
-                };
                 let sampler = self.sampler(mat.sampler)?;
+                let (set, pool) = self.allocate_material_set()?;
                 let image_info = [vk::DescriptorImageInfo {
                     sampler,
                     image_view: view,
@@ -521,6 +553,7 @@ impl Renderer {
                 }
                 model.materials.push(GpuMaterial {
                     set,
+                    pool,
                     base_color: mat.base_color,
                     alpha_cutoff: mat.alpha_cutoff,
                     double_sided: mat.double_sided,
@@ -529,7 +562,7 @@ impl Renderer {
             Ok(())
         };
         if let Err(e) = build() {
-            model.destroy(&mut self.ctx, self.descriptor_pool);
+            model.destroy(&mut self.ctx);
             return Err(e);
         }
         Ok(model)
@@ -866,6 +899,9 @@ impl Drop for Renderer {
             d.destroy_descriptor_set_layout(self.frame_layout, None);
             d.destroy_descriptor_set_layout(self.material_layout, None);
             d.destroy_descriptor_pool(self.descriptor_pool, None);
+            for pool in self.material_pools.drain(..) {
+                d.destroy_descriptor_pool(pool, None);
+            }
             d.destroy_command_pool(self.command_pool, None);
             for (_, s) in self.samplers.drain() {
                 d.destroy_sampler(s, None);

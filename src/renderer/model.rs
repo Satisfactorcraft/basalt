@@ -116,6 +116,8 @@ pub struct CpuModel {
 
 pub struct GpuMaterial {
     pub set: vk::DescriptorSet,
+    /// The pool `set` came from (material pools grow on demand).
+    pub pool: vk::DescriptorPool,
     pub base_color: Vec4,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
@@ -130,11 +132,10 @@ pub struct GpuModel {
 }
 
 impl GpuModel {
-    pub fn destroy(self, ctx: &mut GpuContext, pool: vk::DescriptorPool) {
-        let sets: Vec<vk::DescriptorSet> = self.materials.iter().map(|m| m.set).collect();
-        if !sets.is_empty() {
+    pub fn destroy(self, ctx: &mut GpuContext) {
+        for m in &self.materials {
             unsafe {
-                let _ = ctx.device.free_descriptor_sets(pool, &sets);
+                let _ = ctx.device.free_descriptor_sets(m.pool, &[m.set]);
             }
         }
         ctx.destroy_buffer(self.vertex_buffer);
