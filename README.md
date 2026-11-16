@@ -164,7 +164,7 @@ game folders you trust.
 
 | You save... | What happens |
 |---|---|
-| a `.lua` file | every script recompiles and is swapped under live entities (state kept, `on_reload` called). Syntax error: the old version keeps running. Runtime error: that script pauses until you fix it. |
+| a `.lua` file | every script recompiles and is swapped under live entities (state kept, `on_reload` called). Syntax error: the old version keeps running. Runtime error: that script pauses, and retries the next time any game file is saved (so fixing a data file it reads also un-pauses it). |
 | the current level `.json` | level reloads. Broken JSON: the current level stays. |
 | a model / texture | GPU caches flush and models reload |
 | `game.json` | needs a restart (logged) |

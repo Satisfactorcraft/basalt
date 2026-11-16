@@ -474,7 +474,7 @@ impl ScriptHost {
                 .reported
                 .insert((inst.script.clone(), hook.to_string()))
             {
-                error!("{}:{hook}: {e}\n  (paused every entity using this script until you fix it and save)", inst.script);
+                error!("{}:{hook}: {e}\n  (entities using this script are paused; they retry when any game file is saved)", inst.script);
             }
         }
     }
@@ -483,7 +483,22 @@ impl ScriptHost {
 
     /// Calls `on_file_changed(path)` on every running script instance, once
     /// per changed game-relative path.
+    ///
+    /// Any save also un-pauses scripts that errored: the error may have come
+    /// from data (a JSON file the script reads), and fixing that data
+    /// wouldn't otherwise trigger a script reload. A still-broken script just
+    /// errors and pauses again.
     pub fn notify_file_changed(&mut self, paths: &[String]) {
+        let mut retried = false;
+        for inst in self.instances.values_mut() {
+            if inst.failed && inst.has_class {
+                inst.failed = false;
+                retried = true;
+            }
+        }
+        if retried {
+            self.reported.clear();
+        }
         for id in self.order.clone() {
             for path in paths {
                 let started = self.instances.get(&id).is_some_and(|i| i.started);
@@ -871,6 +886,43 @@ mod tests {
         assert_eq!(
             global::<String>(&host, "SEEN"),
             "data/a.json;textures/b.png;"
+        );
+    }
+
+    #[test]
+    fn data_error_recovers_when_data_is_fixed() {
+        let (g, mut host) = game(
+            "data-recover",
+            &[
+                ("levels/l.json", r#"{"entities":[{"script":"scripts/d.lua"}]}"#),
+                (
+                    "scripts/d.lua",
+                    "local D = {} function D:on_file_changed(p) GOT = json.decode(game.read_file('data/x.json')).v end function D:on_update() TICKS = (TICKS or 0) + 1 end return D",
+                ),
+                ("data/x.json", r#"{"v": 1}"#),
+            ],
+        );
+        host.load_level("levels/l.json").unwrap();
+        host.update(0.016);
+        std::fs::write(g.0.join("data/x.json"), "{ broken").unwrap();
+        host.notify_file_changed(&["data/x.json".into()]);
+        host.update(0.016);
+        let ticks_while_paused: i64 = global(&host, "TICKS");
+        host.update(0.016);
+        assert_eq!(
+            global::<i64>(&host, "TICKS"),
+            ticks_while_paused,
+            "should be paused"
+        );
+
+        std::fs::write(g.0.join("data/x.json"), r#"{"v": 2}"#).unwrap();
+        host.notify_file_changed(&["data/x.json".into()]);
+        assert_eq!(global::<i64>(&host, "GOT"), 2);
+        host.update(0.016);
+        assert_eq!(
+            global::<i64>(&host, "TICKS"),
+            ticks_while_paused + 1,
+            "should run again"
         );
     }
 }
