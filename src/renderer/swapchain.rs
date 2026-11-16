@@ -87,6 +87,17 @@ impl Swapchain {
                 height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
             }
         };
+        // OPAQUE isn't guaranteed; some compositors only offer the others.
+        let composite_alpha = [
+            vk::CompositeAlphaFlagsKHR::OPAQUE,
+            vk::CompositeAlphaFlagsKHR::INHERIT,
+            vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+            vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+        ]
+        .into_iter()
+        .find(|&m| caps.supported_composite_alpha.contains(m))
+        .ok_or_else(|| anyhow!("surface supports no composite alpha mode"))?;
+
         let mut image_count = caps.min_image_count + 1;
         if caps.max_image_count > 0 {
             image_count = image_count.min(caps.max_image_count);
@@ -102,7 +113,7 @@ impl Swapchain {
             .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .pre_transform(caps.current_transform)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+            .composite_alpha(composite_alpha)
             .present_mode(present_mode)
             .clipped(true)
             .old_swapchain(old);
