@@ -223,6 +223,24 @@ impl ScriptHost {
         let g = lua.globals();
         g.set("dofile", Value::Nil)?;
         g.set("loadfile", Value::Nil)?;
+        // Binary chunks are unverified in Lua 5.4: malformed bytecode can
+        // corrupt the VM and escape the sandbox. Force load() to text mode
+        // (args other than `mode` pass through untouched; an explicit nil
+        // `env` means something different from an absent one) and drop
+        // string.dump, which only exists to produce bytecode.
+        let raw_load: LuaFunction = g.get("load")?;
+        g.set(
+            "load",
+            lua.create_function(move |lua, args: MultiValue| {
+                let mut args: Vec<Value> = args.into_iter().collect();
+                if args.len() < 3 {
+                    args.resize(3, Value::Nil);
+                }
+                args[2] = Value::String(lua.create_string("t")?);
+                raw_load.call::<MultiValue>(MultiValue::from_iter(args))
+            })?,
+        )?;
+        g.get::<LuaTable>("string")?.set("dump", Value::Nil)?;
         let os: LuaTable = g.get("os")?;
         for name in [
             "execute",
@@ -709,6 +727,38 @@ mod tests {
         assert!(
             escape.is_err(),
             "require escaped the game folder: {escape:?}"
+        );
+        // #19: no bytecode: string.dump is gone and load() refuses binary chunks
+        // even when asked for mode "b", while text chunks and env still work.
+        assert!(lua
+            .load("return string.dump")
+            .eval::<Value>()
+            .unwrap()
+            .is_nil());
+        let (f, err): (Value, Option<String>) = lua
+            .load("return load('\\27Lua\\x54\\0', 'x', 'b')")
+            .eval()
+            .unwrap();
+        assert!(f.is_nil(), "binary chunk was accepted");
+        assert!(err.unwrap().contains("binary"));
+        assert_eq!(
+            lua.load("return load('return 1 + 1')()")
+                .eval::<i64>()
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            lua.load("return load('return x', 'c', 't', { x = 5 })()")
+                .eval::<i64>()
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            lua.load("local y = 9; return load('return y')()")
+                .eval::<Value>()
+                .unwrap()
+                .is_nil(),
+            true
         );
         assert!(lua
             .load("return package.searchpath")
